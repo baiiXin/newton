@@ -2274,13 +2274,25 @@ def zcy_forward_step_penetration_free(
 ):
     particle_index = wp.tid()
 
-    prev_pos[particle_index] = pos[particle_index]
     vel_new = vel[particle_index] + gravity * dt
-    pos_inertia = pos[particle_index] + vel_new * dt
+    pos_inertia = prev_pos[particle_index] + vel_new * dt
     inertia[particle_index] = pos_inertia
 
     pos[particle_index] = apply_conservative_bound_truncation(
         particle_index, pos_inertia, pos_prev_collision_detection, particle_conservative_bounds
+    )
+
+@wp.kernel
+def zcy_truncation_by_conservative_bounds(
+    pos_new: wp.array(dtype=wp.vec3),
+    pos_prev_collision_detection: wp.array(dtype=wp.vec3),
+    particle_conservative_bounds: wp.array(dtype=float),
+    pos_cur_truncation: wp.array(dtype=wp.vec3),
+):
+    particle_index = wp.tid()
+
+    pos_cur_truncation[particle_index] = apply_conservative_bound_truncation(
+        particle_index, pos_new[particle_index], pos_prev_collision_detection, particle_conservative_bounds
     )
 
 @wp.kernel
@@ -3518,7 +3530,7 @@ class zcy_SolverVBD(SolverBase):
     def zcy_forward_step_penetration_free(
         self, pos_warp, pos_prev_warp, vel_warp, dt: float, control: Control = None
     ):
-        self.zcy_collision_detection_penetration_free(pos_warp, dt)
+        self.zcy_collision_detection_penetration_free(pos_prev_warp, dt)
 
         model=self.model
 
@@ -3539,14 +3551,18 @@ class zcy_SolverVBD(SolverBase):
             ],
             dim=model.particle_count,
             device=self.device,
-        )        
+        )
 
-    def zcy_collision_detection_penetration_free(self, pos_warp, dt):
-        self.trimesh_collision_detector.refit(pos_warp)
+        #a = pos_warp.numpy()
+        #b = pos_prev_warp.numpy()
+        #print('max(pos_cur-pos_prev):', np.max(a-b), np.max(b-a))        
+
+    def zcy_collision_detection_penetration_free(self, pos_prev_warp, dt):
+        self.trimesh_collision_detector.refit(pos_prev_warp)
         self.trimesh_collision_detector.vertex_triangle_collision_detection(self.self_contact_margin)
         self.trimesh_collision_detector.edge_edge_collision_detection(self.self_contact_margin)
 
-        self.pos_prev_collision_detection.assign(pos_warp)
+        self.pos_prev_collision_detection.assign(pos_prev_warp)
         wp.launch(
             kernel=compute_particle_conservative_bound,
             inputs=[
@@ -3561,6 +3577,27 @@ class zcy_SolverVBD(SolverBase):
             dim=self.model.particle_count,
             device=self.device,
         )
+        
+    def zcy_truncation_by_conservative_bound(self, pos_warp):
+
+        pos_truncation = wp.zeros_like(pos_warp)
+
+        wp.launch(
+            kernel=zcy_truncation_by_conservative_bounds,
+            inputs=[
+                pos_warp,
+                self.pos_prev_collision_detection,
+                self.particle_conservative_bounds,
+            ],
+            outputs=[
+                pos_truncation,
+            ],
+            dim=self.model.particle_count,
+            device=self.device,
+        )
+
+        pos_warp, pos_truncation = pos_truncation, pos_warp
+
 # zcy
 
 
