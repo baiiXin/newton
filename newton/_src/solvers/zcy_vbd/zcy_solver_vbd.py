@@ -2910,7 +2910,7 @@ class zcy_SolverVBD(SolverBase):
         iterations: int = 10,
         handle_self_contact: bool = False,
         self_contact_radius: float = 0.3,
-        self_contact_margin: float = 0.5,
+        self_contact_margin: float = 0.32,
         integrate_with_external_rigid_solver: bool = False,
         penetration_free_conservative_bound_relaxation: float = 0.42,
         friction_epsilon: float = 1e-2,
@@ -3530,7 +3530,7 @@ class zcy_SolverVBD(SolverBase):
     def zcy_forward_step_penetration_free(
         self, pos_warp, pos_prev_warp, vel_warp, dt: float, control: Control = None
     ):
-        self.zcy_collision_detection_penetration_free(pos_prev_warp, dt)
+        self.zcy_collision_detection_penetration_free(pos_prev_warp)
 
         model=self.model
 
@@ -3552,12 +3552,33 @@ class zcy_SolverVBD(SolverBase):
             dim=model.particle_count,
             device=self.device,
         )
+        print('\n---start truncation---')
+        print('min(conservation bounds)', np.min(self.particle_conservative_bounds.numpy()))
+        #print('dis(pos_prev, pos_prev_collision)', np.max(np.abs(pos_prev_warp.numpy()-self.pos_prev_collision_detection.numpy())))
+        norms = np.linalg.norm(pos_warp.numpy()-self.pos_prev_collision_detection.numpy(), axis=1)
+        print('max(norms-self.particle_conservative_bounds):', np.max(norms-self.particle_conservative_bounds.numpy()))
+
+        #print('max(pos_warp-self.pos_prev_collision):', np.max(np.linalg.norm(pos_warp.numpy()-self.pos_prev_collision_detection.numpy(), axis=1)))
+        
+        #print('pos_warp', id(pos_warp))
+        #print('pos_prev_warp', id(pos_prev_warp))
+        
+        # must include this after you update the mesh position, otherwise the collision detection results are not precise
+        self.trimesh_collision_detector.refit(pos_warp)
+        self.trimesh_collision_detector.triangle_triangle_intersection_detection()
+
+        # ===== 打印三角形相交检测结果 =====
+        print("===== Triangle-Triangle Intersection Results =====")
+        # 2. 每个三角形的相交数量
+        counts = self.trimesh_collision_detector.triangle_intersecting_triangles_count.numpy()
+        # 额外：总相交数量
+        print("Total intersections:", counts.sum())
 
         #a = pos_warp.numpy()
         #b = pos_prev_warp.numpy()
         #print('max(pos_cur-pos_prev):', np.max(a-b), np.max(b-a))        
 
-    def zcy_collision_detection_penetration_free(self, pos_prev_warp, dt):
+    def zcy_collision_detection_penetration_free(self, pos_prev_warp):
         self.trimesh_collision_detector.refit(pos_prev_warp)
         self.trimesh_collision_detector.vertex_triangle_collision_detection(self.self_contact_margin)
         self.trimesh_collision_detector.edge_edge_collision_detection(self.self_contact_margin)
@@ -3578,25 +3599,44 @@ class zcy_SolverVBD(SolverBase):
             device=self.device,
         )
         
-    def zcy_truncation_by_conservative_bound(self, pos_warp):
+    def zcy_truncation_by_conservative_bound(self, pos_new):
 
-        pos_truncation = wp.zeros_like(pos_warp)
+        pos_old = wp.clone(pos_new)
 
         wp.launch(
             kernel=zcy_truncation_by_conservative_bounds,
             inputs=[
-                pos_warp,
+                pos_old,
                 self.pos_prev_collision_detection,
                 self.particle_conservative_bounds,
             ],
             outputs=[
-                pos_truncation,
+                pos_new,
             ],
             dim=self.model.particle_count,
             device=self.device,
         )
 
-        pos_warp, pos_truncation = pos_truncation, pos_warp
+        print('\n---truncation---')
+        print('min(conservation bounds)', np.min(self.particle_conservative_bounds.numpy()))
+        norms_pos_old = np.linalg.norm(pos_old.numpy()-self.pos_prev_collision_detection.numpy(), axis=1)
+        print('max(norms_pos_old-self.particle_conservative_bounds):', np.max(norms_pos_old-self.particle_conservative_bounds.numpy()))
+        norms_pos_new = np.linalg.norm(pos_new.numpy()-self.pos_prev_collision_detection.numpy(), axis=1)
+        print('max(norms_pos_new-self.particle_conservative_bounds):', np.max(norms_pos_new-self.particle_conservative_bounds.numpy()))
+
+        # must include this after you update the mesh position, otherwise the collision detection results are not precise
+        self.trimesh_collision_detector.refit(pos_new)
+        self.trimesh_collision_detector.triangle_triangle_intersection_detection()
+
+        # ===== 打印三角形相交检测结果 =====
+        print("===== Triangle-Triangle Intersection Results =====")
+        # 2. 每个三角形的相交数量
+        counts = self.trimesh_collision_detector.triangle_intersecting_triangles_count.numpy()
+        # 额外：总相交数量
+        print("Total intersections:", counts.sum())
+
+        #print('pos_old', id(pos_old))
+        #print('pos_new', id(pos_new))
 
 # zcy
 
