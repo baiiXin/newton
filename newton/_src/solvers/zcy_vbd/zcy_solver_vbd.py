@@ -2311,6 +2311,21 @@ def zcy_VBD_accumulate_contact_force_and_hessian(
     friction_mu: float,
     friction_epsilon: float,
     edge_edge_parallel_epsilon: float,
+    # body-particle contact
+    particle_radius: wp.array(dtype=float),
+    soft_contact_particle: wp.array(dtype=int),
+    contact_count: wp.array(dtype=int),
+    contact_max: int,
+    shape_material_mu: wp.array(dtype=float),
+    shape_body: wp.array(dtype=int),
+    body_q: wp.array(dtype=wp.transform),
+    body_q_prev: wp.array(dtype=wp.transform),
+    body_qd: wp.array(dtype=wp.spatial_vector),
+    body_com: wp.array(dtype=wp.vec3),
+    contact_shape: wp.array(dtype=int),
+    contact_body_pos: wp.array(dtype=wp.vec3),
+    contact_body_vel: wp.array(dtype=wp.vec3),
+    contact_normal: wp.array(dtype=wp.vec3),
     # outputs: particle force and hessian
     particle_forces: wp.array(dtype=wp.vec3),
     particle_hessians: wp.array(dtype=wp.mat33),
@@ -2466,6 +2481,39 @@ def zcy_VBD_accumulate_contact_force_and_hessian(
                 wp.atomic_add(particle_hessians, particle_idx*N+tri_a, collision_hessian_30)
                 wp.atomic_add(particle_hessians, particle_idx*N+tri_b, collision_hessian_31)
                 wp.atomic_add(particle_hessians, particle_idx*N+tri_c, collision_hessian_32)
+
+
+    particle_body_contact_count = min(contact_max, contact_count[0])
+
+    if t_id < particle_body_contact_count:
+        particle_idx = soft_contact_particle[t_id]
+
+        body_contact_force, body_contact_hessian = evaluate_body_particle_contact(
+            particle_idx,
+            pos[particle_idx],
+            pos_prev[particle_idx],
+            t_id,
+            soft_contact_ke,
+            soft_contact_kd,
+            friction_mu,
+            friction_epsilon,
+            particle_radius,
+            shape_material_mu,
+            shape_body,
+            body_q,
+            body_q_prev,
+            body_qd,
+            body_com,
+            contact_shape,
+            contact_body_pos,
+            contact_body_vel,
+            contact_normal,
+            dt,
+        )
+
+        # particle
+        wp.atomic_add(particle_forces, particle_idx, body_contact_force)
+        wp.atomic_add(particle_hessians, particle_idx*N+particle_idx, body_contact_hessian)
 # zcy
 
 
@@ -3486,7 +3534,7 @@ class zcy_SolverVBD(SolverBase):
 
 # zcy
     def zcy_compute_hessian_force(
-        self, pos_warp, pos_prev_warp, dt: float, control: Control = None
+        self, pos_warp, pos_prev_warp, dt: float, state_in: State, state_out: State, control: Control = None, contacts: Contacts = None,
     ):
         # input
         #pos_warp = wp.array(pos, dtype=wp.float32)
@@ -3522,6 +3570,21 @@ class zcy_SolverVBD(SolverBase):
                         self.model.soft_contact_mu,
                         self.friction_epsilon,
                         self.trimesh_collision_detector.edge_edge_parallel_epsilon,
+                        # body-particle contact
+                        self.model.particle_radius,
+                        contacts.soft_contact_particle,
+                        contacts.soft_contact_count,
+                        contacts.soft_contact_max,
+                        self.model.shape_material_mu,
+                        self.model.shape_body,
+                        state_out.body_q if self.integrate_with_external_rigid_solver else state_in.body_q,
+                        state_in.body_q if self.integrate_with_external_rigid_solver else None,
+                        self.model.body_qd,
+                        self.model.body_com,
+                        contacts.soft_contact_shape,
+                        contacts.soft_contact_body_pos,
+                        contacts.soft_contact_body_vel,
+                        contacts.soft_contact_normal,
                     ],
                     outputs=[self.particle_forces, self.particle_hessians],
                     device=self.device,
