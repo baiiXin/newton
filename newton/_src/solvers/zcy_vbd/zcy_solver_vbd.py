@@ -1066,8 +1066,8 @@ def zcy_evaluate_edge_edge_contact_2_vertices(
 
         collision_hessian_10 = collision_hessian * bs[0] * bs[0]
         collision_hessian_11 = collision_hessian * bs[1] * bs[1]
-        collision_hessian_101 = collision_hessian * bs[0] * bs[1] + bs[0] * bs[1] * friction_hessian
-        collision_hessian_110 = collision_hessian * bs[1] * bs[0] + bs[1] * bs[0] * friction_hessian
+        collision_hessian_101 = collision_hessian * bs[0] * bs[1] #+ bs[0] * bs[1] * friction_hessian
+        collision_hessian_110 = collision_hessian * bs[1] * bs[0] #+ bs[1] * bs[0] * friction_hessian
 
         collision_normal_normal_sign = wp.vec4(1.0, 1.0, -1.0, -1.0)
         damping_force, damping_hessian = damp_collision(
@@ -1077,8 +1077,8 @@ def zcy_evaluate_edge_edge_contact_2_vertices(
             collision_damping,
             dt,
         )
-        collision_force_10 += damping_force + bs[0] * friction_force
-        collision_hessian_10 += damping_hessian + bs[0] * bs[0] * friction_hessian
+        #collision_force_10 += damping_force + bs[0] * friction_force
+        #collision_hessian_10 += damping_hessian + bs[0] * bs[0] * friction_hessian
 
         damping_force, damping_hessian = damp_collision(
             displacement_11,
@@ -1087,8 +1087,8 @@ def zcy_evaluate_edge_edge_contact_2_vertices(
             collision_damping,
             dt,
         )
-        collision_force_11 += damping_force + bs[1] * friction_force
-        collision_hessian_11 += damping_hessian + bs[1] * bs[1] * friction_hessian
+        #collision_force_11 += damping_force + bs[1] * friction_force
+        #collision_hessian_11 += damping_hessian + bs[1] * bs[1] * friction_hessian
 
         # DeBUG
         #wp.printf(
@@ -1118,8 +1118,8 @@ def zcy_evaluate_edge_edge_contact_2_vertices(
 
         collision_hessian_20 = collision_hessian * bs[2] * bs[2]
         collision_hessian_21 = collision_hessian * bs[3] * bs[3]
-        collision_hessian_201 = collision_hessian * bs[2] * bs[3] + bs[2] * bs[3] * friction_hessian
-        collision_hessian_210 = collision_hessian * bs[3] * bs[2] + bs[3] * bs[2] * friction_hessian
+        collision_hessian_201 = collision_hessian * bs[2] * bs[3] #+ bs[2] * bs[3] * friction_hessian
+        collision_hessian_210 = collision_hessian * bs[3] * bs[2] #+ bs[3] * bs[2] * friction_hessian
 
         collision_normal_normal_sign = wp.vec4(1.0, 1.0, -1.0, -1.0)
         damping_force, damping_hessian = damp_collision(
@@ -1130,8 +1130,8 @@ def zcy_evaluate_edge_edge_contact_2_vertices(
             dt,
         )
 
-        collision_force_20 += damping_force + bs[2] * friction_force
-        collision_hessian_20 += damping_hessian + bs[2] * bs[2] * friction_hessian
+        #collision_force_20 += damping_force + bs[2] * friction_force
+        #collision_hessian_20 += damping_hessian + bs[2] * bs[2] * friction_hessian
 
         damping_force, damping_hessian = damp_collision(
             displacement_21,
@@ -1140,20 +1140,20 @@ def zcy_evaluate_edge_edge_contact_2_vertices(
             collision_damping,
             dt,
         )
-        collision_force_21 += damping_force + bs[3] * friction_force
-        collision_hessian_21 += damping_hessian + bs[3] * bs[3] * friction_hessian
+        #collision_force_21 += damping_force + bs[3] * friction_force
+        #collision_hessian_21 += damping_hessian + bs[3] * bs[3] * friction_hessian
 
         # edge1 to edge2
-        collision_hessian_1200 = bs[0] * bs[2] * collision_hessian  + bs[0] * bs[2] * friction_hessian
-        collision_hessian_1201 = bs[0] * bs[3] * collision_hessian  + bs[0] * bs[3] * friction_hessian
-        collision_hessian_1210 = bs[1] * bs[2] * collision_hessian  + bs[1] * bs[2] * friction_hessian
-        collision_hessian_1211 = bs[1] * bs[3] * collision_hessian  + bs[1] * bs[3] * friction_hessian
+        collision_hessian_1200 = bs[0] * bs[2] * collision_hessian  #+ bs[0] * bs[2] * friction_hessian
+        collision_hessian_1201 = bs[0] * bs[3] * collision_hessian  #+ bs[0] * bs[3] * friction_hessian
+        collision_hessian_1210 = bs[1] * bs[2] * collision_hessian  #+ bs[1] * bs[2] * friction_hessian
+        collision_hessian_1211 = bs[1] * bs[3] * collision_hessian  #+ bs[1] * bs[3] * friction_hessian
 
         # edge2 to edge1
-        collision_hessian_2100 = bs[2] * bs[0] * collision_hessian  + bs[2] * bs[0] * friction_hessian
-        collision_hessian_2101 = bs[2] * bs[1] * collision_hessian  + bs[2] * bs[1] * friction_hessian
-        collision_hessian_2110 = bs[3] * bs[0] * collision_hessian  + bs[3] * bs[0] * friction_hessian
-        collision_hessian_2111 = bs[3] * bs[1] * collision_hessian  + bs[3] * bs[1] * friction_hessian
+        collision_hessian_2100 = bs[2] * bs[0] * collision_hessian  #+ bs[2] * bs[0] * friction_hessian
+        collision_hessian_2101 = bs[2] * bs[1] * collision_hessian  #+ bs[2] * bs[1] * friction_hessian
+        collision_hessian_2110 = bs[3] * bs[0] * collision_hessian  #+ bs[3] * bs[0] * friction_hessian
+        collision_hessian_2111 = bs[3] * bs[1] * collision_hessian  #+ bs[3] * bs[1] * friction_hessian
 
         return True, collision_force_10, collision_force_11, collision_hessian_10, collision_hessian_11, \
                     collision_force_20, collision_force_21, collision_hessian_20, collision_hessian_21, \
@@ -1259,8 +1259,8 @@ def zcy_evaluate_vertex_triangle_collision_force_hessian_4_vertices(
             dt,
         )
 
-        collision_force_0 += damping_force + bs[0] * friction_force
-        collision_hessian_0 += damping_hessian + bs[0] * bs[0] * friction_hessian
+        #collision_force_0 += damping_force + bs[0] * friction_force
+        #collision_hessian_0 += damping_hessian + bs[0] * bs[0] * friction_hessian
 
         damping_force, damping_hessian = damp_collision(
             displacement_1,
@@ -1269,8 +1269,8 @@ def zcy_evaluate_vertex_triangle_collision_force_hessian_4_vertices(
             collision_damping,
             dt,
         )
-        collision_force_1 += damping_force + bs[1] * friction_force
-        collision_hessian_1 += damping_hessian + bs[1] * bs[1] * friction_hessian
+        #collision_force_1 += damping_force + bs[1] * friction_force
+        #collision_hessian_1 += damping_hessian + bs[1] * bs[1] * friction_hessian
 
         damping_force, damping_hessian = damp_collision(
             displacement_2,
@@ -1279,8 +1279,8 @@ def zcy_evaluate_vertex_triangle_collision_force_hessian_4_vertices(
             collision_damping,
             dt,
         )
-        collision_force_2 += damping_force + bs[2] * friction_force
-        collision_hessian_2 += damping_hessian + bs[2] * bs[2] * friction_hessian
+        #collision_force_2 += damping_force + bs[2] * friction_force
+        #collision_hessian_2 += damping_hessian + bs[2] * bs[2] * friction_hessian
 
         damping_force, damping_hessian = damp_collision(
             displacement_3,
@@ -1289,22 +1289,22 @@ def zcy_evaluate_vertex_triangle_collision_force_hessian_4_vertices(
             collision_damping,
             dt,
         )
-        collision_force_3 += damping_force + bs[3] * friction_force
-        collision_hessian_3 += damping_hessian + bs[3] * bs[3] * friction_hessian
+        #collision_force_3 += damping_force + bs[3] * friction_force
+        #collision_hessian_3 += damping_hessian + bs[3] * bs[3] * friction_hessian
 
         # vertex to triangle
-        collision_hessian_01 = bs[0] * bs[1] * collision_hessian + bs[0] * bs[1] * friction_hessian
-        collision_hessian_02 = bs[0] * bs[2] * collision_hessian + bs[0] * bs[2] * friction_hessian
-        collision_hessian_03 = bs[0] * bs[3] * collision_hessian + bs[0] * bs[3] * friction_hessian
-        collision_hessian_10 = bs[1] * bs[0] * collision_hessian + bs[1] * bs[0] * friction_hessian
-        collision_hessian_12 = bs[1] * bs[2] * collision_hessian + bs[1] * bs[2] * friction_hessian
-        collision_hessian_13 = bs[1] * bs[3] * collision_hessian + bs[1] * bs[3] * friction_hessian
-        collision_hessian_20 = bs[2] * bs[0] * collision_hessian + bs[2] * bs[0] * friction_hessian
-        collision_hessian_21 = bs[2] * bs[1] * collision_hessian + bs[2] * bs[1] * friction_hessian
-        collision_hessian_23 = bs[2] * bs[3] * collision_hessian + bs[2] * bs[3] * friction_hessian
-        collision_hessian_30 = bs[3] * bs[0] * collision_hessian + bs[3] * bs[0] * friction_hessian
-        collision_hessian_31 = bs[3] * bs[1] * collision_hessian + bs[3] * bs[1] * friction_hessian
-        collision_hessian_32 = bs[3] * bs[2] * collision_hessian + bs[3] * bs[2] * friction_hessian
+        collision_hessian_01 = bs[0] * bs[1] * collision_hessian #+ bs[0] * bs[1] * friction_hessian
+        collision_hessian_02 = bs[0] * bs[2] * collision_hessian #+ bs[0] * bs[2] * friction_hessian
+        collision_hessian_03 = bs[0] * bs[3] * collision_hessian #+ bs[0] * bs[3] * friction_hessian
+        collision_hessian_10 = bs[1] * bs[0] * collision_hessian #+ bs[1] * bs[0] * friction_hessian
+        collision_hessian_12 = bs[1] * bs[2] * collision_hessian #+ bs[1] * bs[2] * friction_hessian
+        collision_hessian_13 = bs[1] * bs[3] * collision_hessian #+ bs[1] * bs[3] * friction_hessian
+        collision_hessian_20 = bs[2] * bs[0] * collision_hessian #+ bs[2] * bs[0] * friction_hessian
+        collision_hessian_21 = bs[2] * bs[1] * collision_hessian #+ bs[2] * bs[1] * friction_hessian
+        collision_hessian_23 = bs[2] * bs[3] * collision_hessian #+ bs[2] * bs[3] * friction_hessian
+        collision_hessian_30 = bs[3] * bs[0] * collision_hessian #+ bs[3] * bs[0] * friction_hessian
+        collision_hessian_31 = bs[3] * bs[1] * collision_hessian #+ bs[3] * bs[1] * friction_hessian
+        collision_hessian_32 = bs[3] * bs[2] * collision_hessian #+ bs[3] * bs[2] * friction_hessian
 
 
         return (
@@ -3615,6 +3615,7 @@ class zcy_SolverVBD(SolverBase):
             dim=model.particle_count,
             device=self.device,
         )
+
         print('\n---start truncation---')
         print('min(conservation bounds)', np.min(self.particle_conservative_bounds.numpy()))
         #print('dis(pos_prev, pos_prev_collision)', np.max(np.abs(pos_prev_warp.numpy()-self.pos_prev_collision_detection.numpy())))
