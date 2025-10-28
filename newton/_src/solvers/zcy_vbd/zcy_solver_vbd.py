@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+from tkinter import N
 import warnings
 
 import numpy as np
@@ -2153,7 +2154,7 @@ def zcy_VBD_accumulate_contact_force_and_hessian(
     vt_contact_forces: wp.array(dtype=wp.vec3),
     vt_contact_hessian_values: wp.array(dtype=wp.mat33),
     vt_contact_hessian_rows: wp.array(dtype=int),
-    vt_contact_hessian_cols: wp.array(dtype=int)
+    vt_contact_hessian_cols: wp.array(dtype=int),
 ):
     
     t_id = wp.tid()
@@ -2319,89 +2320,90 @@ def zcy_VBD_accumulate_contact_force_and_hessian(
                 friction_mu,
                 friction_epsilon,
             )
-        if has_contact:
-            contact_index = t_id
-            contact_base = contact_index * 16  # 每个 particle-tri contact 占16个条目
+            if has_contact:
+                contact_index = t_id
+                contact_base = contact_index * 16  # 每个 particle-tri contact 占16个条目
 
-            # --- 力累加 ---
-            wp.atomic_add(vt_contact_forces, particle_idx, collision_force_3)
-            wp.atomic_add(vt_contact_forces, tri_a, collision_force_0)
-            wp.atomic_add(vt_contact_forces, tri_b, collision_force_1)
-            wp.atomic_add(vt_contact_forces, tri_c, collision_force_2)
+                # --- 力累加 ---
+                wp.atomic_add(vt_contact_forces, particle_idx, collision_force_3)
+                wp.atomic_add(vt_contact_forces, tri_a, collision_force_0)
+                wp.atomic_add(vt_contact_forces, tri_b, collision_force_1)
+                wp.atomic_add(vt_contact_forces, tri_c, collision_force_2)
 
-            # --- 对角块 ---
-            # particle
-            vt_contact_hessian_rows[contact_base + 0] = particle_idx
-            vt_contact_hessian_cols[contact_base + 0] = particle_idx
-            vt_contact_hessian_values[contact_base + 0] = collision_hessian_3
+                # --- 对角块 ---
+                # particle
+                vt_contact_hessian_rows[contact_base + 0] = particle_idx
+                vt_contact_hessian_cols[contact_base + 0] = particle_idx
+                vt_contact_hessian_values[contact_base + 0] = collision_hessian_3
 
-            # tri_a
-            vt_contact_hessian_rows[contact_base + 1] = tri_a
-            vt_contact_hessian_cols[contact_base + 1] = tri_a
-            vt_contact_hessian_values[contact_base + 1] = collision_hessian_0
+                # tri_a
+                vt_contact_hessian_rows[contact_base + 1] = tri_a
+                vt_contact_hessian_cols[contact_base + 1] = tri_a
+                vt_contact_hessian_values[contact_base + 1] = collision_hessian_0
 
-            # tri_b
-            vt_contact_hessian_rows[contact_base + 2] = tri_b
-            vt_contact_hessian_cols[contact_base + 2] = tri_b
-            vt_contact_hessian_values[contact_base + 2] = collision_hessian_1
+                # tri_b
+                vt_contact_hessian_rows[contact_base + 2] = tri_b
+                vt_contact_hessian_cols[contact_base + 2] = tri_b
+                vt_contact_hessian_values[contact_base + 2] = collision_hessian_1
 
-            # tri_c
-            vt_contact_hessian_rows[contact_base + 3] = tri_c
-            vt_contact_hessian_cols[contact_base + 3] = tri_c
-            vt_contact_hessian_values[contact_base + 3] = collision_hessian_2
+                # tri_c
+                vt_contact_hessian_rows[contact_base + 3] = tri_c
+                vt_contact_hessian_cols[contact_base + 3] = tri_c
+                vt_contact_hessian_values[contact_base + 3] = collision_hessian_2
 
-            # --- cross blocks ---
-            # a0
-            vt_contact_hessian_rows[contact_base + 4] = tri_a
-            vt_contact_hessian_cols[contact_base + 4] = tri_b
-            vt_contact_hessian_values[contact_base + 4] = collision_hessian_01
+                # --- cross blocks ---
+                # a0
+                vt_contact_hessian_rows[contact_base + 4] = tri_a
+                vt_contact_hessian_cols[contact_base + 4] = tri_b
+                vt_contact_hessian_values[contact_base + 4] = collision_hessian_01
 
-            vt_contact_hessian_rows[contact_base + 5] = tri_a
-            vt_contact_hessian_cols[contact_base + 5] = tri_c
-            vt_contact_hessian_values[contact_base + 5] = collision_hessian_02
+                vt_contact_hessian_rows[contact_base + 5] = tri_a
+                vt_contact_hessian_cols[contact_base + 5] = tri_c
+                vt_contact_hessian_values[contact_base + 5] = collision_hessian_02
 
-            vt_contact_hessian_rows[contact_base + 6] = tri_a
-            vt_contact_hessian_cols[contact_base + 6] = particle_idx
-            vt_contact_hessian_values[contact_base + 6] = collision_hessian_03
+                vt_contact_hessian_rows[contact_base + 6] = tri_a
+                vt_contact_hessian_cols[contact_base + 6] = particle_idx
+                vt_contact_hessian_values[contact_base + 6] = collision_hessian_03
 
-            # b1
-            vt_contact_hessian_rows[contact_base + 7] = tri_b
-            vt_contact_hessian_cols[contact_base + 7] = tri_a
-            vt_contact_hessian_values[contact_base + 7] = collision_hessian_10
+                # b1
+                vt_contact_hessian_rows[contact_base + 7] = tri_b
+                vt_contact_hessian_cols[contact_base + 7] = tri_a
+                vt_contact_hessian_values[contact_base + 7] = collision_hessian_10
 
-            vt_contact_hessian_rows[contact_base + 8] = tri_b
-            vt_contact_hessian_cols[contact_base + 8] = tri_c
-            vt_contact_hessian_values[contact_base + 8] = collision_hessian_12
+                vt_contact_hessian_rows[contact_base + 8] = tri_b
+                vt_contact_hessian_cols[contact_base + 8] = tri_c
+                vt_contact_hessian_values[contact_base + 8] = collision_hessian_12
 
-            vt_contact_hessian_rows[contact_base + 9] = tri_b
-            vt_contact_hessian_cols[contact_base + 9] = particle_idx
-            vt_contact_hessian_values[contact_base + 9] = collision_hessian_13
+                vt_contact_hessian_rows[contact_base + 9] = tri_b
+                vt_contact_hessian_cols[contact_base + 9] = particle_idx
+                vt_contact_hessian_values[contact_base + 9] = collision_hessian_13
 
-            # c2
-            vt_contact_hessian_rows[contact_base + 10] = tri_c
-            vt_contact_hessian_cols[contact_base + 10] = tri_a
-            vt_contact_hessian_values[contact_base + 10] = collision_hessian_20
+                # c2
+                vt_contact_hessian_rows[contact_base + 10] = tri_c
+                vt_contact_hessian_cols[contact_base + 10] = tri_a
+                vt_contact_hessian_values[contact_base + 10] = collision_hessian_20
 
-            vt_contact_hessian_rows[contact_base + 11] = tri_c
-            vt_contact_hessian_cols[contact_base + 11] = tri_b
-            vt_contact_hessian_values[contact_base + 11] = collision_hessian_21
+                vt_contact_hessian_rows[contact_base + 11] = tri_c
+                vt_contact_hessian_cols[contact_base + 11] = tri_b
+                vt_contact_hessian_values[contact_base + 11] = collision_hessian_21
 
-            vt_contact_hessian_rows[contact_base + 12] = tri_c
-            vt_contact_hessian_cols[contact_base + 12] = particle_idx
-            vt_contact_hessian_values[contact_base + 12] = collision_hessian_23
+                vt_contact_hessian_rows[contact_base + 12] = tri_c
+                vt_contact_hessian_cols[contact_base + 12] = particle_idx
+                vt_contact_hessian_values[contact_base + 12] = collision_hessian_23
 
-            # p3
-            vt_contact_hessian_rows[contact_base + 13] = particle_idx
-            vt_contact_hessian_cols[contact_base + 13] = tri_a
-            vt_contact_hessian_values[contact_base + 13] = collision_hessian_30
+                # p3
+                vt_contact_hessian_rows[contact_base + 13] = particle_idx
+                vt_contact_hessian_cols[contact_base + 13] = tri_a
+                vt_contact_hessian_values[contact_base + 13] = collision_hessian_30
 
-            vt_contact_hessian_rows[contact_base + 14] = particle_idx
-            vt_contact_hessian_cols[contact_base + 14] = tri_b
-            vt_contact_hessian_values[contact_base + 14] = collision_hessian_31
+                vt_contact_hessian_rows[contact_base + 14] = particle_idx
+                vt_contact_hessian_cols[contact_base + 14] = tri_b
+                vt_contact_hessian_values[contact_base + 14] = collision_hessian_31
 
-            vt_contact_hessian_rows[contact_base + 15] = particle_idx
-            vt_contact_hessian_cols[contact_base + 15] = tri_c
-            vt_contact_hessian_values[contact_base + 15] = collision_hessian_32
+                vt_contact_hessian_rows[contact_base + 15] = particle_idx
+                vt_contact_hessian_cols[contact_base + 15] = tri_c
+                vt_contact_hessian_values[contact_base + 15] = collision_hessian_32
+
 
 @wp.kernel
 def zcy_accumulate_spring_force_and_hessian(
@@ -2487,6 +2489,33 @@ def zcy_assemble_inertia_and_gravity_add_force(
 
     b[tid] = -1.0/dt/dt * mass * inertia + spring_forces[free_particle] + edge_contact_forces[free_particle] + vt_contact_forces[free_particle] + gravity
 
+@wp.kernel
+def zcy_residual_computation(
+    pos_warp: wp.array(dtype=wp.vec3),
+    pos_prev_warp: wp.array(dtype=wp.vec3),
+    vel_warp: wp.array(dtype=wp.vec3),
+    dt: float,
+    mass: float,
+    gravity: wp.vec3,
+    # force
+    spring_forces: wp.array(dtype=wp.vec3),
+    edge_contact_forces: wp.array(dtype=wp.vec3),
+    vt_contact_forces: wp.array(dtype=wp.vec3),
+    # fixed particle
+    free_particle_offset: wp.array(dtype=wp.int32),
+    # outputs: 
+    residual: wp.array(dtype=wp.vec3)
+):
+    tid = wp.tid() 
+    free_particle = tid + free_particle_offset[tid]
+
+    # wp.printf("Thread %d: free_particle = %d\n", tid, free_particle)
+
+    # inertia
+    inertia = pos_warp[free_particle] - pos_prev_warp[free_particle] - dt * vel_warp[free_particle]
+
+    residual[tid] = inertia - 1.0/mass *dt*dt * (spring_forces[free_particle] + edge_contact_forces[free_particle] + vt_contact_forces[free_particle] + gravity)
+
 
 @wp.kernel
 def zcy_update_velocity(
@@ -2536,10 +2565,6 @@ def warp_coo_deduplicate(rows, cols, vals):
     out_vals_flat = np.zeros((n_unique, 9), dtype=vals_np.dtype)
     np.add.at(out_vals_flat, inv, vals_flat)
     out_vals_np = out_vals_flat.reshape(n_unique, 3, 3)
-
-    if len(out_rows_np) == 1:
-        if np.allclose(out_vals_np[0], 0.0):
-            return (False, False, False)
 
     return (
         wp.array(out_rows_np, dtype=int),
@@ -3000,6 +3025,9 @@ class zcy_SolverVBD(SolverBase):
 
     def __init__(
         self,
+        # self parameters
+        dt: float,
+        mass: float,
         # fixed particle mask
         fixed_particle_num: int,
         free_particle_offset: wp.array(dtype=wp.int32),
@@ -3117,6 +3145,10 @@ class zcy_SolverVBD(SolverBase):
         self.vt_contact_hessian_values = wp.zeros(self.num_contact*16, dtype=wp.mat33, device=self.device)
         self.vt_contact_hessian_rows = wp.zeros(self.num_contact*16, dtype=int, device=self.device)
         self.vt_contact_hessian_cols = wp.zeros(self.num_contact*16, dtype=int, device=self.device)
+
+        # static matrix
+        self.zcy_compute_static_matrix(dt, mass)
+
         # endregion: my
         
     def compute_force_element_adjacency(self, model):
@@ -3236,24 +3268,36 @@ class zcy_SolverVBD(SolverBase):
 
 # zcy
     def zcy_simulate_one_step(
-        self,  pos_warp, pos_prev_warp, vel_warp, dt: float, mass: float, damping: float, num_iter: int
+        self,  pos_warp, pos_prev_warp, vel_warp, dt: float, mass: float, damping: float, num_iter: int, tolerance: float
     ):
+        # 
+        #print('tri_indices', self.model.tri_indices)
+        #print('edge_indices', self.model.edge_indices)
+
         # collision detection before initialization to compute conservative bounds for initialization
         self.zcy_collision_detection_penetration_free(pos_prev_warp)
         
         # forward
-        #print(f'pos_warp = {pos_warp.numpy()}')
         self.zcy_forward_step_penetration_free(pos_warp, pos_prev_warp, vel_warp, dt)
-        #print(f'pos_warp = {pos_warp.numpy()}')
 
         # after initialization, we need new collision detection to update the bounds
         # collision detection
         self.zcy_collision_detection_penetration_free(pos_warp)
 
+        #print('\ncollision_info', self.trimesh_collision_detector.collision_info)
+        #np.savetxt("debug_contact.txt", self.trimesh_collision_detector.vertex_colliding_triangles, fmt="%d")
+        '''
+        # 写入 JSON 文件
+        import json
+        with open("data.json", "w", encoding="utf-8") as f:
+            json.dump(self.trimesh_collision_detector.collision_info, f)
+        '''
+
         for _iter in range(num_iter):
 
-            # assemble matrix
-            A, b = self.zcy_assemble_matrix(pos_warp, pos_prev_warp, vel_warp, dt, mass)
+            # assemble matrix and vector
+            A = self.zcy_assemble_matrix(pos_warp)
+            b = self.zcy_assemble_vector(pos_warp, pos_prev_warp, vel_warp, dt, mass)
 
             # preallocate memory for dx
             dx = wp.zeros_like(b)
@@ -3272,7 +3316,13 @@ class zcy_SolverVBD(SolverBase):
             )
 
             # truncation
-            self.zcy_truncation_by_conservative_bound(pos_warp)
+            #self.zcy_truncation_by_conservative_bound(pos_warp)
+
+            # compute residual
+            residual_norm = self.zcy_compute_residual(pos_warp, pos_prev_warp, vel_warp, dt, mass)
+            print('residual_norm:', residual_norm)
+            if residual_norm < tolerance:
+                break
 
         wp.launch(
             kernel=zcy_update_velocity,
@@ -3281,11 +3331,7 @@ class zcy_SolverVBD(SolverBase):
             device=self.device,
         )
 
-    def zcy_assemble_matrix(self, pos_warp, pos_prev_warp, vel_warp, dt, mass):
-        # contact hessian
-        edge_contact_hessian, vt_contact_hessian = self.zcy_compute_contact_hessian_force(pos_warp)
-        # spring hessian
-        spring_hessian = self.zcy_compute_spring_hessian_force(pos_warp)
+    def zcy_assemble_vector(self, pos_warp, pos_prev_warp, vel_warp, dt, mass):
         
         # inertia and gravity
         b = wp.zeros(shape=(self.free_particle_num,), dtype=wp.vec3)
@@ -3312,27 +3358,79 @@ class zcy_SolverVBD(SolverBase):
             device=self.device,
         )
 
-        A = bsr_identity(rows_of_blocks=self.free_particle_num, block_type=wp.mat33)
+        return b
 
-        bsr_scale(
-            A,                 # Input/output matrix
-            alpha=1/dt/dt * mass,             # Scale factor
-        )
+    def zcy_assemble_matrix(self, pos_warp):
+        # contact hessian
+        edge_contact_hessian_rows, edge_contact_hessian_cols, edge_contact_hessian_values, vt_contact_hessian_rows, vt_contact_hessian_cols, vt_contact_hessian_values = self.zcy_compute_contact_hessian_force(pos_warp)
+        # spring hessian
+        spring_hessian_rows, spring_hessian_cols, spring_hessian_values = self.zcy_compute_spring_hessian_force(pos_warp)
         
-        #print(f'A_org = {A}')
-        #print(f'spring_hessian = {spring_hessian}')
-        if spring_hessian:
-            A +=  spring_hessian 
-            #print(f'A+spring = {A}')
-        if edge_contact_hessian:
-            A += edge_contact_hessian
-            #print(f'A+edge = {A}')
-        if vt_contact_hessian:
-            A += vt_contact_hessian
-            #print(f'A+vt = {A}')
+        #print('\n---A or hessian---')
+        #print(f"\nspring_hessian_rows={spring_hessian_rows}, spring_hessian_rows.shape={spring_hessian_rows.shape}")
+        #print(f"\nspring_hessian_cols={spring_hessian_cols}, spring_hessian_cols.shape={spring_hessian_cols.shape}")
+        #print(f"\nedge_contact_hessian_rows={edge_contact_hessian_rows}, edge_contact_hessian_rows.shape={edge_contact_hessian_rows.shape}")
+        #print(f"\nedge_contact_hessian_cols={edge_contact_hessian_cols}, edge_contact_hessian_cols.shape={edge_contact_hessian_cols.shape}")
+        #print(f"\nvt_contact_hessian_rows={vt_contact_hessian_rows}, vt_contact_hessian_rows.shape={vt_contact_hessian_rows.shape}")
+        #print(f"\nvt_contact_hessian_cols={vt_contact_hessian_cols}, vt_contact_hessian_cols.shape={vt_contact_hessian_cols.shape}")
 
-        return A, b
+        A_rows = np.concatenate((self.A_rows, spring_hessian_rows.numpy(), edge_contact_hessian_rows.numpy(), vt_contact_hessian_rows.numpy()), axis=0)
+        A_cols = np.concatenate((self.A_cols, spring_hessian_cols.numpy(), edge_contact_hessian_cols.numpy(), vt_contact_hessian_cols.numpy()), axis=0)
+        A_values = np.concatenate((self.A_values, spring_hessian_values.numpy(), edge_contact_hessian_values.numpy(), vt_contact_hessian_values.numpy()), axis=0)
+        
+        #print(f"\nA_rows={A_rows}, A_rows.shape={A_rows.shape}")
+        #print(f"\nA_cols={A_cols}, A_cols.shape={A_cols.shape}")
+        A_rows, A_cols, A_values = warp_coo_deduplicate(wp.array(A_rows, dtype=int), wp.array(A_cols, dtype=int), wp.array(A_values, dtype=wp.mat33))
+        #print(f"\nA_rows={A_rows}, A_rows.shape={A_rows.shape}")
+        #print(f"\nA_cols={A_cols}, A_cols.shape={A_cols.shape}")
+        A_rows, A_cols, A_values = remove_fixed_blocks(A_rows, A_cols, A_values, self.all_particle_flag)
 
+        A = bsr_from_triplets(
+                rows_of_blocks=self.free_particle_num,      # 行块数
+                cols_of_blocks=self.free_particle_num,      # 列块数
+                rows=A_rows,             # 块行索引
+                columns=A_cols,          # 块列索引
+                values=A_values            # 块数据
+        )
+        return A
+
+    def zcy_compute_residual(self, pos_warp, pos_prev_warp, vel_warp, dt, mass):
+        
+        # inertia and gravity
+        residual = wp.zeros(shape=(self.free_particle_num,), dtype=wp.vec3)
+        gravity = wp.vec3(0.0, 0.0, -9.81)
+        wp.launch(
+            kernel=zcy_residual_computation,
+            inputs=[
+                pos_warp,
+                pos_prev_warp,
+                vel_warp,
+                dt,
+                mass,
+                gravity,
+                # force
+                self.spring_forces,
+                self.edge_contact_forces,
+                self.vt_contact_forces,
+                # fixed particle
+                self.free_particle_offset,
+                # outputs: 
+                residual
+            ],
+            dim=self.free_particle_num,
+            device=self.device,
+        )
+
+        residual_norm = np.linalg.norm(np.linalg.norm(residual.numpy(), axis=1))
+        return residual_norm
+
+
+    def zcy_compute_static_matrix(self, dt, mass):
+        # inertia and gravity
+        self.A_rows = np.array([i for i in range(self.num_particle)])
+        self.A_cols = np.array([i for i in range(self.num_particle)])
+        self.A_values = np.array([np.eye(3) * mass / dt**2 for _ in range(self.num_particle)])
+        
     def zcy_compute_contact_hessian_force(
         self, pos_warp
     ):
@@ -3350,6 +3448,7 @@ class zcy_SolverVBD(SolverBase):
         # dim
         wp.launch(
             kernel=zcy_VBD_accumulate_contact_force_and_hessian,
+                # inputs
             dim=self.num_contact,
             inputs=[
                 pos_warp,
@@ -3374,53 +3473,32 @@ class zcy_SolverVBD(SolverBase):
                 self.vt_contact_forces,
                 self.vt_contact_hessian_values,
                 self.vt_contact_hessian_rows,
-                self.vt_contact_hessian_cols
+                self.vt_contact_hessian_cols,
             ],
             device=self.device,
         )
 
         # edge
+        #print('\n---edge---')
+        #print(f"\nedge_contact_hessian_rows={self.edge_contact_hessian_rows}, edge_contact_hessian_rows.shape={self.edge_contact_hessian_rows.shape}")
+        #print(f"\nedge_contact_hessian_cols={self.edge_contact_hessian_cols}, edge_contact_hessian_cols.shape={self.edge_contact_hessian_cols.shape}")
         edge_contact_hessian_rows, edge_contact_hessian_cols, edge_contact_hessian_values = warp_coo_deduplicate(
             self.edge_contact_hessian_rows, self.edge_contact_hessian_cols, self.edge_contact_hessian_values)
+        
         # vt
+        #print('\n---vt---')
+        #print(f"\nvt_contact_hessian_rows={self.vt_contact_hessian_rows}, vt_contact_hessian_rows.shape={self.vt_contact_hessian_rows.shape}")
+        #print(f"\nvt_contact_hessian_cols={self.vt_contact_hessian_cols}, vt_contact_hessian_cols.shape={self.vt_contact_hessian_cols.shape}")
+        #np.savetxt("debug_rows.txt", self.vt_contact_hessian_rows, fmt="%d")
+        #np.savetxt("debug_cols.txt", self.vt_contact_hessian_cols, fmt="%d")
         vt_contact_hessian_rows, vt_contact_hessian_cols, vt_contact_hessian_values = warp_coo_deduplicate(
             self.vt_contact_hessian_rows, self.vt_contact_hessian_cols, self.vt_contact_hessian_values)
+        #print(f"\nvt_contact_hessian_rows={vt_contact_hessian_rows}, vt_contact_hessian_rows.shape={vt_contact_hessian_rows.shape}")
+        #print(f"\nvt_contact_hessian_cols={vt_contact_hessian_cols}, vt_contact_hessian_cols.shape={vt_contact_hessian_cols.shape}")
 
-        # edge hessian
-        #print(f"\nedge_contact_hessian_values={self.edge_contact_hessian_values}")
-        if edge_contact_hessian_values:
 
-            edge_contact_hessian_rows, edge_contact_hessian_cols, edge_contact_hessian_values = remove_fixed_blocks(
-                edge_contact_hessian_rows, edge_contact_hessian_cols, edge_contact_hessian_values, self.all_particle_flag)
+        return edge_contact_hessian_rows, edge_contact_hessian_cols, edge_contact_hessian_values, vt_contact_hessian_rows, vt_contact_hessian_cols, vt_contact_hessian_values
 
-            edge_contact_hessian = bsr_from_triplets(
-                rows_of_blocks=self.free_particle_num,   # 行块数
-                cols_of_blocks=self.free_particle_num,   # 列块数
-                rows=edge_contact_hessian_rows,
-                columns=edge_contact_hessian_cols,
-                values=edge_contact_hessian_values
-            )
-        else:
-            edge_contact_hessian = None
-
-        # vt hessian
-        if vt_contact_hessian_values:
-
-            vt_contact_hessian_rows, vt_contact_hessian_cols, vt_contact_hessian_values = remove_fixed_blocks(
-                vt_contact_hessian_rows, vt_contact_hessian_cols, vt_contact_hessian_values, self.all_particle_flag)
-
-            vt_contact_hessian = bsr_from_triplets(
-                rows_of_blocks=self.free_particle_num,   # 行块数
-                cols_of_blocks=self.free_particle_num,   # 列块数
-                rows=vt_contact_hessian_rows,
-                columns=vt_contact_hessian_cols,
-                values=vt_contact_hessian_values
-            )
-        else:
-            vt_contact_hessian = None
-
-        return edge_contact_hessian, vt_contact_hessian
-        
     def zcy_compute_spring_hessian_force(
         self, pos_warp,
     ):
@@ -3429,16 +3507,6 @@ class zcy_SolverVBD(SolverBase):
         self.spring_hessian_values.zero_()
         self.spring_hessian_rows.zero_()
         self.spring_hessian_cols.zero_()
-
-        '''
-        print('\nspring_hessian_values',self.spring_hessian_values.shape, self.spring_hessian_values)
-        print(f"\nspring_hessian_rows={self.spring_hessian_rows}")
-        print(f"\nspring_hessian_cols={self.spring_hessian_cols}")
-        print(f"\nspring_indices={self.spring_indices}")
-        print(f"\nspring_rest_length={self.spring_rest_length}")
-        print(f"\nspring_stiffness={self.spring_stiffness}")
-        print(f"\nspring_num={self.num_spring}")
-        '''
 
         # dim
         wp.launch(
@@ -3460,26 +3528,12 @@ class zcy_SolverVBD(SolverBase):
         )
         
         # spring
+        #print('\n---spring---')
         spring_hessian_rows, spring_hessian_cols, spring_hessian_values = warp_coo_deduplicate(
             self.spring_hessian_rows, self.spring_hessian_cols, self.spring_hessian_values)
-        
-        # spring hessian
-        if spring_hessian_values:
 
-            spring_hessian_rows, spring_hessian_cols, spring_hessian_values = remove_fixed_blocks(
-                spring_hessian_rows, spring_hessian_cols, spring_hessian_values, self.all_particle_flag)
+        return spring_hessian_rows, spring_hessian_cols, spring_hessian_values
 
-            spring_hessian = bsr_from_triplets(
-                rows_of_blocks=self.free_particle_num,   # 行块数
-                cols_of_blocks=self.free_particle_num,   # 列块数
-                rows=spring_hessian_rows,
-                columns=spring_hessian_cols,
-                values=spring_hessian_values
-            )
-        else:
-            spring_hessian = None
-
-        return spring_hessian
 
     def zcy_forward_step_penetration_free(
         self, pos_warp, pos_prev_warp, vel_warp, dt: float
@@ -3508,6 +3562,7 @@ class zcy_SolverVBD(SolverBase):
             device=self.device,
         )
 
+
     def zcy_collision_detection_penetration_free(self, pos_prev_warp):
         self.trimesh_collision_detector.refit(pos_prev_warp)
         self.trimesh_collision_detector.vertex_triangle_collision_detection(self.self_contact_margin)
@@ -3528,7 +3583,8 @@ class zcy_SolverVBD(SolverBase):
             dim=self.model.particle_count,
             device=self.device,
         )
-        
+
+    
     def zcy_truncation_by_conservative_bound(self, pos_new):
 
         pos_old = wp.clone(pos_new)
