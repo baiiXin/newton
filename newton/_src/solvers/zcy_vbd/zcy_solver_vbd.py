@@ -3040,8 +3040,8 @@ class zcy_SolverVBD(SolverBase):
         model: Model,
         iterations: int = 10,
         handle_self_contact: bool = False,
-        self_contact_radius: float = 0.2,
-        self_contact_margin: float = 0.2,
+        self_contact_radius: float = 0.02,
+        self_contact_margin: float = 0.02,
         integrate_with_external_rigid_solver: bool = False,
         penetration_free_conservative_bound_relaxation: float = 0.42,
         friction_epsilon: float = 1e-2,
@@ -3294,6 +3294,8 @@ class zcy_SolverVBD(SolverBase):
         '''
 
         for _iter in range(num_iter):
+            # collision detection
+            self.zcy_collision_detection_penetration_free(pos_warp)
 
             # assemble matrix and vector
             A = self.zcy_assemble_matrix(pos_warp)
@@ -3316,13 +3318,15 @@ class zcy_SolverVBD(SolverBase):
             )
 
             # truncation
-            #self.zcy_truncation_by_conservative_bound(pos_warp)
+            self.zcy_truncation_by_conservative_bound(pos_warp)
 
             # compute residual
             residual_norm = self.zcy_compute_residual(pos_warp, pos_prev_warp, vel_warp, dt, mass)
             print('residual_norm:', residual_norm)
             if residual_norm < tolerance:
                 break
+            if _iter == num_iter - 1:
+                raise RuntimeError("\n--- warning: reach max iter ---\n")
 
         wp.launch(
             kernel=zcy_update_velocity,
