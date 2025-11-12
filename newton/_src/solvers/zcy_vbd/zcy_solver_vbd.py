@@ -27,6 +27,10 @@ from warp.optim.linear import cg
 from warp.sparse import bsr_zeros, bsr_identity, bsr_diag
 from warp.sparse import bsr_mm, bsr_mv, bsr_axpy, bsr_scale
 
+import numpy as np
+from scipy.sparse import bsr_matrix
+from pypardiso import spsolve
+
 
 from ...core.types import override
 from ...geometry import ParticleFlags
@@ -935,8 +939,107 @@ def evaluate_edge_edge_contact_2_vertices(
 
         return False, collision_force, collision_force, collision_hessian, collision_hessian
 
-
 # zcy
+@wp.func
+def zcy_evaluate_stvk_force_hessian(
+    face: int,
+    pos: wp.array(dtype=wp.vec3),
+    tri_indices: wp.array(dtype=wp.int32, ndim=2),
+    tri_pose: wp.mat22,
+    area: float,
+    mu: float,
+    lmbd: float,
+):
+    # StVK energy：输出3个force与9个Hessian块（保持原参数签名，不引入包装）
+
+    # 1) 组装 F 的两列
+    v0 = tri_indices[face, 0]
+    v1 = tri_indices[face, 1]
+    v2 = tri_indices[face, 2]
+
+    x0 = pos[v0]
+    x01 = pos[v1] - x0
+    x02 = pos[v2] - x0
+
+    DmInv00 = tri_pose[0, 0]
+    DmInv01 = tri_pose[0, 1]
+    DmInv10 = tri_pose[1, 0]
+    DmInv11 = tri_pose[1, 1]
+
+    f0 = x01 * DmInv00 + x02 * DmInv10
+    f1 = x01 * DmInv01 + x02 * DmInv11
+
+    # 2) Green 应变与阈值
+    f0f0 = wp.dot(f0, f0)
+    f1f1 = wp.dot(f1, f1)
+    f0f1 = wp.dot(f0, f1)
+
+    G00 = 0.5 * (f0f0 - 1.0)
+    G11 = 0.5 * (f1f1 - 1.0)
+    G01 = 0.5 * f0f1
+
+    G_norm_sq = G00 * G00 + G11 * G11 + 2.0 * G01 * G01
+    if G_norm_sq < 1.0e-20:
+        z = wp.vec3(0.0, 0.0, 0.0)
+        Z = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        return z, z, z, Z, Z, Z, Z, Z, Z, Z, Z, Z
+
+    # 3) PK1 两列
+    t = G00 + G11
+    two_mu = 2.0 * mu
+    lt = lmbd * t
+    PK1_col0 = f0 * (two_mu * G00 + lt) + f1 * (two_mu * G01)
+    PK1_col1 = f0 * (two_mu * G01) + f1 * (two_mu * G11 + lt)
+
+    # 4) f 空间 Hessian 块 A00/A01/A11
+    Ic = f0f0 + f1f1
+    c = -mu + (0.5 * Ic - 1.0) * lmbd
+    I3 = wp.identity(n=3, dtype=float)
+
+    f0of0 = wp.outer(f0, f0)
+    f1of1 = wp.outer(f1, f1)
+    f0of1 = wp.outer(f0, f1)
+    f1of0 = wp.outer(f1, f0)
+
+    A00 = lmbd * f0of0 + c * I3 + mu * (f0f0 * I3 + 2.0 * f0of0 + f1of1)
+    A01 = lmbd * f0of1 + mu * (f0f1 * I3 + f1of0)
+    A11 = lmbd * f1of1 + c * I3 + mu * (f1f1 * I3 + 2.0 * f1of1 + f0of0)
+
+    # 5) 位置空间系数 alpha
+    a00 = -(DmInv00 + DmInv10)
+    a01 = DmInv00
+    a02 = DmInv10
+    b00 = -(DmInv01 + DmInv11)
+    b01 = DmInv01
+    b02 = DmInv11
+
+    # 6) 三个顶点力（忽略 v_order，直接全输出）
+    f_a0 = -(PK1_col0 * a00 + PK1_col1 * b00) * area
+    f_a1 = -(PK1_col0 * a01 + PK1_col1 * b01) * area
+    f_a2 = -(PK1_col0 * a02 + PK1_col1 * b02) * area
+
+    # 7) 九个海森块（Hab 公式）
+    A01T = wp.transpose(A01)
+
+    H00 = (a00 * a00) * A00 + (b00 * b00) * A11 + (a00 * b00) * A01 + (b00 * a00) * A01T
+    H01 = (a00 * a01) * A00 + (b00 * b01) * A11 + (a00 * b01) * A01 + (b00 * a01) * A01T
+    H02 = (a00 * a02) * A00 + (b00 * b02) * A11 + (a00 * b02) * A01 + (b00 * a02) * A01T
+
+    H10 = (a01 * a00) * A00 + (b01 * b00) * A11 + (a01 * b00) * A01 + (b01 * a00) * A01T
+    H11 = (a01 * a01) * A00 + (b01 * b01) * A11 + (a01 * b01) * A01 + (b01 * a01) * A01T
+    H12 = (a01 * a02) * A00 + (b01 * b02) * A11 + (a01 * b02) * A01 + (b01 * a02) * A01T
+
+    H20 = (a02 * a00) * A00 + (b02 * b00) * A11 + (a02 * b00) * A01 + (b02 * a00) * A01T
+    H21 = (a02 * a01) * A00 + (b02 * b01) * A11 + (a02 * b01) * A01 + (b02 * a01) * A01T
+    H22 = (a02 * a02) * A00 + (b02 * b02) * A11 + (a02 * b02) * A01 + (b02 * a02) * A01T
+
+    # 面积缩放（力已乘 area；海森也乘 area）
+    H00 *= area; H01 *= area; H02 *= area
+    H10 *= area; H11 *= area; H12 *= area
+    H20 *= area; H21 *= area; H22 *= area
+
+    return f_a0, f_a1, f_a2, H00, H01, H02, H10, H11, H12, H20, H21, H22
+
 @wp.func
 def zcy_evaluate_edge_edge_contact_2_vertices(
     e1: int,
@@ -2614,6 +2717,144 @@ def remove_fixed_blocks(rows, cols, vals, flag_all_particle):
         wp.array(vals_np, dtype=wp.mat33)
     )
 
+def build_bsr_from_block_coo(blocks_data: np.ndarray,
+                              row: np.ndarray,
+                              col: np.ndarray,
+                              nb: int,
+                              blocksize: tuple[int, int] = (3, 3),
+                              sort_blocks: bool = True) -> bsr_matrix:
+    """
+    用 3×3×N 的数值块数组 + 块级坐标 (row, col) 构造 BSR 矩阵。
+
+    参数:
+      - blocks_data: 形状为 (nnz_blocks, br, bc) 的数值数组，例如 (N, 3, 3)。
+      - row, col: 每个块的块行与块列索引，长度为 nnz_blocks，范围在 [0, nb)。
+      - nb: 块行/块列的总数（最终矩阵尺寸为 (nb*br, nb*bc)）。
+      - blocksize: 每个块的尺寸 (br, bc)，默认 (3, 3)。
+      - sort_blocks: 是否按 (row, col) 排序以生成规范的 indptr/indices。
+
+    返回:
+      - scipy.sparse.bsr_matrix，形状为 (nb*br, nb*bc)。
+    """
+    blocks_data = np.asarray(blocks_data, dtype=np.float64)
+    row = np.asarray(row, dtype=np.int64)
+    col = np.asarray(col, dtype=np.int64)
+
+    if blocks_data.ndim != 3:
+        raise ValueError("blocks_data 必须是三维数组，形状为 (nnz_blocks, br, bc)")
+    nnz_blocks, br, bc = blocks_data.shape
+    if (br, bc) != tuple(blocksize):
+        raise ValueError(f"块尺寸不匹配: blocks_data 为 {(br, bc)}, 期望 {blocksize}")
+    if row.shape != (nnz_blocks,) or col.shape != (nnz_blocks,):
+        raise ValueError("row/col 长度必须与块数 nnz_blocks 相同")
+    if np.any(row < 0) or np.any(row >= nb) or np.any(col < 0) or np.any(col >= nb):
+        raise ValueError("row/col 索引越界: 必须在 [0, nb) 范围内")
+
+    # 规范顺序：按 (row, col) 排序，便于构建 indptr/indices
+    if sort_blocks:
+        order = np.lexsort((col, row))
+        row = row[order]
+        col = col[order]
+        blocks_data = blocks_data[order]
+
+    # 构造 BSR 压缩格式需要的 indptr/indices
+    counts = np.bincount(row, minlength=nb)
+    indptr = np.empty(nb + 1, dtype=np.int64)
+    indptr[0] = 0
+    np.cumsum(counts, out=indptr[1:])
+    indices = col
+
+    A_bsr = bsr_matrix((blocks_data, indices, indptr), shape=(nb * br, nb * bc))
+    return A_bsr
+
+
+@wp.kernel
+def zcy_accumulate_stvk_force_and_hessian(
+    # inputs
+    pos: wp.array(dtype=wp.vec3),
+    # stvk force and hessian
+    tri_indices: wp.array(dtype=wp.int32, ndim=2),
+    tri_poses: wp.array(dtype=wp.mat22),
+    tri_materials: wp.array(dtype=float, ndim=2),
+    tri_areas: wp.array(dtype=float),
+    # outputs: particle force and hessian
+    stvk_forces: wp.array(dtype=wp.vec3),
+    stvk_hessian_values: wp.array(dtype=wp.mat33),
+    stvk_hessian_rows: wp.array(dtype=int),
+    stvk_hessian_cols: wp.array(dtype=int)
+):
+    tri_index = wp.tid()
+    
+    # 获取当前三角形的索引和顶点顺序
+    a = tri_indices[tri_index, 0]
+    b = tri_indices[tri_index, 1]
+    c = tri_indices[tri_index, 2]
+
+    # elastic force and hessian
+    f_a, f_b, f_c, h_aa, h_ab, h_ac, h_ba, h_bb, h_bc, h_ca, h_cb, h_cc = zcy_evaluate_stvk_force_hessian(
+        tri_index,
+        pos,
+        tri_indices,
+        tri_poses[tri_index],
+        tri_areas[tri_index],
+        tri_materials[tri_index, 0],
+        tri_materials[tri_index, 1],
+    )
+
+    # --- 累加到端点 ---
+    wp.atomic_add(stvk_forces, a, f_a)
+    wp.atomic_add(stvk_forces, b, f_b)
+    wp.atomic_add(stvk_forces, c, f_c)
+
+    # 记录9个对称块
+    # 每个spring_index 生成9个条目：base + [0,1,2,3,4,5,6,7,8]
+    base = tri_index * 9
+
+    # (a,a):
+    stvk_hessian_rows[base + 0] = a
+    stvk_hessian_cols[base + 0] = a
+    stvk_hessian_values[base + 0] = h_aa
+
+    # (a,b):
+    stvk_hessian_rows[base + 1] = a
+    stvk_hessian_cols[base + 1] = b
+    stvk_hessian_values[base + 1] = h_ab
+
+    # (a,c):
+    stvk_hessian_rows[base + 2] = a
+    stvk_hessian_cols[base + 2] = c
+    stvk_hessian_values[base + 2] = h_ac
+
+    # (b,a): 
+    stvk_hessian_rows[base + 3] = b
+    stvk_hessian_cols[base + 3] = a
+    stvk_hessian_values[base + 3] = h_ba
+
+    # (b,b): 
+    stvk_hessian_rows[base + 4] = b
+    stvk_hessian_cols[base + 4] = b
+    stvk_hessian_values[base + 4] = h_bb
+
+    # (b,c): 
+    stvk_hessian_rows[base + 5] = b
+    stvk_hessian_cols[base + 5] = c
+    stvk_hessian_values[base + 5] = h_bc
+
+    # (c,a): 
+    stvk_hessian_rows[base + 6] = c
+    stvk_hessian_cols[base + 6] = a
+    stvk_hessian_values[base + 6] = h_ca
+
+    # (c,b): 
+    stvk_hessian_rows[base + 7] = c
+    stvk_hessian_cols[base + 7] = b
+    stvk_hessian_values[base + 7] = h_cb
+
+    # (c,c): 
+    stvk_hessian_rows[base + 8] = c
+    stvk_hessian_cols[base + 8] = c
+    stvk_hessian_values[base + 8] = h_cc
+
 
 # zcy
 
@@ -3112,6 +3353,7 @@ class zcy_SolverVBD(SolverBase):
         self.spring_rest_length = spring_rest_length
         self.spring_stiffness = spring_stiffness
         print('\n', self.spring_indices.shape, self.spring_rest_length.shape, self.spring_stiffness.shape)
+        print(self.model.tri_indices.shape, self.model.tri_poses.shape, self.model.tri_materials.shape, self.model.tri_areas.shape)
 
         # fixed particle
         self.fixed_particle_num = fixed_particle_num
@@ -3120,7 +3362,9 @@ class zcy_SolverVBD(SolverBase):
         self.all_particle_flag = all_particle_flag
 
         # sparse hessian
+        self.spring = 0
         self.num_spring = self.spring_rest_length.shape[0]
+        self.num_triangles = self.model.tri_indices.shape[0]
         self.num_contact = self.collision_evaluation_kernel_launch_size
 
         # spaces for particle force and hessian
@@ -3130,10 +3374,16 @@ class zcy_SolverVBD(SolverBase):
         self.friction_epsilon = friction_epsilon
         
         # spring
-        self.spring_forces = wp.zeros(self.num_particle, dtype=wp.vec3, device=self.device)
-        self.spring_hessian_values = wp.zeros(self.num_spring*4, dtype=wp.mat33, device=self.device)
-        self.spring_hessian_rows = wp.zeros(self.num_spring*4, dtype=int, device=self.device)
-        self.spring_hessian_cols = wp.zeros(self.num_spring*4, dtype=int, device=self.device)
+        if self.spring:
+            self.spring_forces = wp.zeros(self.num_particle, dtype=wp.vec3, device=self.device)
+            self.spring_hessian_values = wp.zeros(self.num_spring*4, dtype=wp.mat33, device=self.device)
+            self.spring_hessian_rows = wp.zeros(self.num_spring*4, dtype=int, device=self.device)
+            self.spring_hessian_cols = wp.zeros(self.num_spring*4, dtype=int, device=self.device)
+        else:
+            self.spring_forces = wp.zeros(self.num_particle, dtype=wp.vec3, device=self.device)
+            self.spring_hessian_values = wp.zeros(self.num_triangles*9, dtype=wp.mat33, device=self.device)
+            self.spring_hessian_rows = wp.zeros(self.num_triangles*9, dtype=int, device=self.device)
+            self.spring_hessian_cols = wp.zeros(self.num_triangles*9, dtype=int, device=self.device)
 
         # edge_contact
         self.edge_contact_forces = wp.zeros(self.num_particle, dtype=wp.vec3, device=self.device)
@@ -3301,13 +3551,16 @@ class zcy_SolverVBD(SolverBase):
             A = self.zcy_assemble_matrix(pos_warp)
             b = self.zcy_assemble_vector(pos_warp, pos_prev_warp, vel_warp, dt, mass)
 
+            '''
             # preallocate memory for dx
             dx = wp.zeros_like(b)
-
             # solve
             result = cg(A, b, dx, tol=1e-6, maxiter=100)
             print(f'\n --- iter:{_iter} ---')
             print('cg_result:', result)
+            '''
+            dx = spsolve(A.tocsr(), b.numpy().reshape(self.free_particle_num*3))
+            dx = wp.array(dx.reshape(self.free_particle_num,3), dtype=wp.vec3)
 
             # update position
             wp.launch(
@@ -3370,25 +3623,19 @@ class zcy_SolverVBD(SolverBase):
         # spring hessian
         spring_hessian_rows, spring_hessian_cols, spring_hessian_values = self.zcy_compute_spring_hessian_force(pos_warp)
         
-        #print('\n---A or hessian---')
-        #print(f"\nspring_hessian_rows={spring_hessian_rows}, spring_hessian_rows.shape={spring_hessian_rows.shape}")
-        #print(f"\nspring_hessian_cols={spring_hessian_cols}, spring_hessian_cols.shape={spring_hessian_cols.shape}")
-        #print(f"\nedge_contact_hessian_rows={edge_contact_hessian_rows}, edge_contact_hessian_rows.shape={edge_contact_hessian_rows.shape}")
-        #print(f"\nedge_contact_hessian_cols={edge_contact_hessian_cols}, edge_contact_hessian_cols.shape={edge_contact_hessian_cols.shape}")
-        #print(f"\nvt_contact_hessian_rows={vt_contact_hessian_rows}, vt_contact_hessian_rows.shape={vt_contact_hessian_rows.shape}")
-        #print(f"\nvt_contact_hessian_cols={vt_contact_hessian_cols}, vt_contact_hessian_cols.shape={vt_contact_hessian_cols.shape}")
-
         A_rows = np.concatenate((self.A_rows, spring_hessian_rows.numpy(), edge_contact_hessian_rows.numpy(), vt_contact_hessian_rows.numpy()), axis=0)
         A_cols = np.concatenate((self.A_cols, spring_hessian_cols.numpy(), edge_contact_hessian_cols.numpy(), vt_contact_hessian_cols.numpy()), axis=0)
         A_values = np.concatenate((self.A_values, spring_hessian_values.numpy(), edge_contact_hessian_values.numpy(), vt_contact_hessian_values.numpy()), axis=0)
-        
-        #print(f"\nA_rows={A_rows}, A_rows.shape={A_rows.shape}")
-        #print(f"\nA_cols={A_cols}, A_cols.shape={A_cols.shape}")
+
         A_rows, A_cols, A_values = warp_coo_deduplicate(wp.array(A_rows, dtype=int), wp.array(A_cols, dtype=int), wp.array(A_values, dtype=wp.mat33))
-        #print(f"\nA_rows={A_rows}, A_rows.shape={A_rows.shape}")
-        #print(f"\nA_cols={A_cols}, A_cols.shape={A_cols.shape}")
+
         A_rows, A_cols, A_values = remove_fixed_blocks(A_rows, A_cols, A_values, self.all_particle_flag)
 
+        A = build_bsr_from_block_coo(
+            A_values.numpy(), A_rows.numpy(), A_cols.numpy(), 
+            nb=self.free_particle_num, blocksize=(3, 3)
+        )
+        '''
         A = bsr_from_triplets(
                 rows_of_blocks=self.free_particle_num,      # 行块数
                 cols_of_blocks=self.free_particle_num,      # 列块数
@@ -3396,6 +3643,7 @@ class zcy_SolverVBD(SolverBase):
                 columns=A_cols,          # 块列索引
                 values=A_values            # 块数据
         )
+        '''
         return A
 
     def zcy_compute_residual(self, pos_warp, pos_prev_warp, vel_warp, dt, mass):
@@ -3506,6 +3754,9 @@ class zcy_SolverVBD(SolverBase):
     def zcy_compute_spring_hessian_force(
         self, pos_warp,
     ):
+        # choose energy
+        spring = 0
+
         # spring
         self.spring_forces.zero_()
         self.spring_hessian_values.zero_()
@@ -3513,23 +3764,43 @@ class zcy_SolverVBD(SolverBase):
         self.spring_hessian_cols.zero_()
 
         # dim
-        wp.launch(
-            kernel=zcy_accumulate_spring_force_and_hessian,
-            inputs=[
-                pos_warp,
-                # spring constraints
-                self.spring_indices,
-                self.spring_rest_length,
-                self.spring_stiffness,
-                # outputs: particle force and hessian
-                self.spring_forces,
-                self.spring_hessian_values,
-                self.spring_hessian_rows,
-                self.spring_hessian_cols
-            ],
-            dim=self.num_spring,
-            device=self.device,
-        )
+        if spring :
+            wp.launch(
+                kernel=zcy_accumulate_spring_force_and_hessian,
+                inputs=[
+                    pos_warp,
+                    # spring constraints
+                    self.spring_indices,
+                    self.spring_rest_length,
+                    self.spring_stiffness,
+                    # outputs: particle force and hessian
+                    self.spring_forces,
+                    self.spring_hessian_values,
+                    self.spring_hessian_rows,
+                    self.spring_hessian_cols
+                ],
+                dim=self.num_spring,
+                device=self.device,
+            )
+        else :
+            wp.launch(
+                kernel=zcy_accumulate_stvk_force_and_hessian,
+                inputs=[
+                    pos_warp,
+                    # stvk force and hessian
+                    self.model.tri_indices,
+                    self.model.tri_poses,
+                    self.model.tri_materials,
+                    self.model.tri_areas,
+                    # outputs: particle force and hessian
+                    self.spring_forces,
+                    self.spring_hessian_values,
+                    self.spring_hessian_rows,
+                    self.spring_hessian_cols
+                ],
+                dim=self.num_triangles,
+                device=self.device,
+            )
         
         # spring
         #print('\n---spring---')
