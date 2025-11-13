@@ -1698,7 +1698,7 @@ def apply_conservative_bound_truncation(
     conservative_bound = particle_conservative_bounds[v_index]
 
     accumulated_displacement_norm = wp.length(accumulated_displacement)
-    if accumulated_displacement_norm > conservative_bound and conservative_bound > 1e-5:
+    if accumulated_displacement_norm > conservative_bound:
         accumulated_displacement_norm_truncated = conservative_bound
         accumulated_displacement = accumulated_displacement * (
             accumulated_displacement_norm_truncated / accumulated_displacement_norm
@@ -3281,10 +3281,10 @@ class zcy_SolverVBD(SolverBase):
         model: Model,
         iterations: int = 10,
         handle_self_contact: bool = False,
-        self_contact_radius: float = 0.02,
-        self_contact_margin: float = 0.02,
+        self_contact_radius: float = 0.08,
+        self_contact_margin: float = 0.08,
         integrate_with_external_rigid_solver: bool = False,
-        penetration_free_conservative_bound_relaxation: float = 0.42,
+        penetration_free_conservative_bound_relaxation: float = 0.4,
         friction_epsilon: float = 1e-2,
         vertex_collision_buffer_pre_alloc: int = 32,
         edge_collision_buffer_pre_alloc: int = 64,
@@ -3520,10 +3520,6 @@ class zcy_SolverVBD(SolverBase):
     def zcy_simulate_one_step(
         self,  pos_warp, pos_prev_warp, vel_warp, dt: float, mass: float, damping: float, num_iter: int, tolerance: float
     ):
-        # 
-        #print('tri_indices', self.model.tri_indices)
-        #print('edge_indices', self.model.edge_indices)
-
         # collision detection before initialization to compute conservative bounds for initialization
         self.zcy_collision_detection_penetration_free(pos_prev_warp)
         
@@ -3533,15 +3529,6 @@ class zcy_SolverVBD(SolverBase):
         # after initialization, we need new collision detection to update the bounds
         # collision detection
         self.zcy_collision_detection_penetration_free(pos_warp)
-
-        #print('\ncollision_info', self.trimesh_collision_detector.collision_info)
-        #np.savetxt("debug_contact.txt", self.trimesh_collision_detector.vertex_colliding_triangles, fmt="%d")
-        '''
-        # 写入 JSON 文件
-        import json
-        with open("data.json", "w", encoding="utf-8") as f:
-            json.dump(self.trimesh_collision_detector.collision_info, f)
-        '''
 
         for _iter in range(num_iter):
             # collision detection
