@@ -403,142 +403,6 @@ def compute_angle_derivative(
 
 
 @wp.func
-def evaluate_dihedral_angle_based_bending_force_hessian(
-    bending_index: int,
-    v_order: int,
-    pos: wp.array(dtype=wp.vec3),
-    pos_prev: wp.array(dtype=wp.vec3),
-    edge_indices: wp.array(dtype=wp.int32, ndim=2),
-    edge_rest_angle: wp.array(dtype=float),
-    edge_rest_length: wp.array(dtype=float),
-    stiffness: float,
-    damping: float,
-    dt: float,
-):
-    # Skip invalid edges (boundary edges with missing opposite vertices)
-    if edge_indices[bending_index, 0] == -1 or edge_indices[bending_index, 1] == -1:
-        return wp.vec3(0.0), wp.mat33(0.0)
-
-    eps = 1.0e-6
-
-    vi0 = edge_indices[bending_index, 0]
-    vi1 = edge_indices[bending_index, 1]
-    vi2 = edge_indices[bending_index, 2]
-    vi3 = edge_indices[bending_index, 3]
-
-    x0 = pos[vi0]  # opposite 0
-    x1 = pos[vi1]  # opposite 1
-    x2 = pos[vi2]  # edge start
-    x3 = pos[vi3]  # edge end
-
-    # Compute edge vectors
-    x02 = x2 - x0
-    x03 = x3 - x0
-    x13 = x3 - x1
-    x12 = x2 - x1
-    e = x3 - x2
-
-    # Compute normals
-    n1 = wp.cross(x02, x03)
-    n2 = wp.cross(x13, x12)
-
-    n1_norm = wp.length(n1)
-    n2_norm = wp.length(n2)
-    e_norm = wp.length(e)
-
-    # Early exit for degenerate cases
-    if n1_norm < eps or n2_norm < eps or e_norm < eps:
-        return wp.vec3(0.0), wp.mat33(0.0)
-
-    n1_hat = n1 / n1_norm
-    n2_hat = n2 / n2_norm
-    e_hat = e / e_norm
-
-    sin_theta = wp.dot(wp.cross(n1_hat, n2_hat), e_hat)
-    cos_theta = wp.dot(n1_hat, n2_hat)
-    theta = wp.atan2(sin_theta, cos_theta)
-
-    k = stiffness * edge_rest_length[bending_index]
-    dE_dtheta = k * (theta - edge_rest_angle[bending_index])
-
-    # Pre-compute skew matrices (shared across all angle derivative computations)
-    skew_e = wp.skew(e)
-    skew_x03 = wp.skew(x03)
-    skew_x02 = wp.skew(x02)
-    skew_x13 = wp.skew(x13)
-    skew_x12 = wp.skew(x12)
-    skew_n1 = wp.skew(n1_hat)
-    skew_n2 = wp.skew(n2_hat)
-
-    # Compute the derivatives of unit normals with respect to each vertex; required for computing angle derivatives
-    dn1hat_dx0 = compute_normalized_vector_derivative(n1_norm, n1_hat, skew_e)
-    dn2hat_dx0 = wp.mat33(0.0)
-
-    dn1hat_dx1 = wp.mat33(0.0)
-    dn2hat_dx1 = compute_normalized_vector_derivative(n2_norm, n2_hat, -skew_e)
-
-    dn1hat_dx2 = compute_normalized_vector_derivative(n1_norm, n1_hat, -skew_x03)
-    dn2hat_dx2 = compute_normalized_vector_derivative(n2_norm, n2_hat, skew_x13)
-
-    dn1hat_dx3 = compute_normalized_vector_derivative(n1_norm, n1_hat, skew_x02)
-    dn2hat_dx3 = compute_normalized_vector_derivative(n2_norm, n2_hat, -skew_x12)
-
-    # Compute all angle derivatives (required for damping)
-    dtheta_dx0 = compute_angle_derivative(
-        n1_hat, n2_hat, e_hat, dn1hat_dx0, dn2hat_dx0, sin_theta, cos_theta, skew_n1, skew_n2
-    )
-    dtheta_dx1 = compute_angle_derivative(
-        n1_hat, n2_hat, e_hat, dn1hat_dx1, dn2hat_dx1, sin_theta, cos_theta, skew_n1, skew_n2
-    )
-    dtheta_dx2 = compute_angle_derivative(
-        n1_hat, n2_hat, e_hat, dn1hat_dx2, dn2hat_dx2, sin_theta, cos_theta, skew_n1, skew_n2
-    )
-    dtheta_dx3 = compute_angle_derivative(
-        n1_hat, n2_hat, e_hat, dn1hat_dx3, dn2hat_dx3, sin_theta, cos_theta, skew_n1, skew_n2
-    )
-
-    # Use float masks for branch-free selection
-    mask0 = float(v_order == 0)
-    mask1 = float(v_order == 1)
-    mask2 = float(v_order == 2)
-    mask3 = float(v_order == 3)
-
-    # Select the derivative for the current vertex without branching
-    dtheta_dx = dtheta_dx0 * mask0 + dtheta_dx1 * mask1 + dtheta_dx2 * mask2 + dtheta_dx3 * mask3
-
-    # Compute elastic force and hessian
-    bending_force = -dE_dtheta * dtheta_dx
-    bending_hessian = k * wp.outer(dtheta_dx, dtheta_dx)
-
-    if damping > 0.0:
-        inv_dt = 1.0 / dt
-        x_prev0 = pos_prev[vi0]
-        x_prev1 = pos_prev[vi1]
-        x_prev2 = pos_prev[vi2]
-        x_prev3 = pos_prev[vi3]
-
-        # Compute displacement vectors
-        dx0 = x0 - x_prev0
-        dx1 = x1 - x_prev1
-        dx2 = x2 - x_prev2
-        dx3 = x3 - x_prev3
-
-        # Compute angular velocity using all derivatives
-        dtheta_dt = (
-            wp.dot(dtheta_dx0, dx0) + wp.dot(dtheta_dx1, dx1) + wp.dot(dtheta_dx2, dx2) + wp.dot(dtheta_dx3, dx3)
-        ) * inv_dt
-
-        damping_coeff = damping * k  # damping coefficients following the VBD convention
-        damping_force = -damping_coeff * dtheta_dt * dtheta_dx
-        damping_hessian = damping_coeff * inv_dt * wp.outer(dtheta_dx, dtheta_dx)
-
-        bending_force = bending_force + damping_force
-        bending_hessian = bending_hessian + damping_hessian
-
-    return bending_force, bending_hessian
-
-
-@wp.func
 def evaluate_body_particle_contact(
     particle_index: int,
     particle_pos: wp.vec3,
@@ -940,6 +804,152 @@ def evaluate_edge_edge_contact_2_vertices(
         return False, collision_force, collision_force, collision_hessian, collision_hessian
 
 # zcy
+@wp.func
+def zcy_evaluate_dihedral_angle_based_bending_force_hessian(
+    bending_index: int,
+    pos: wp.array(dtype=wp.vec3),
+    edge_indices: wp.array(dtype=wp.int32, ndim=2),
+    edge_rest_angle: wp.array(dtype=float),
+    edge_rest_length: wp.array(dtype=float),
+    stiffness: float,
+):
+    eps = 1.0e-6
+
+    vi0 = edge_indices[bending_index, 0]
+    vi1 = edge_indices[bending_index, 1]
+    vi2 = edge_indices[bending_index, 2]
+    vi3 = edge_indices[bending_index, 3]
+
+    x0 = pos[vi0]  # opposite 0
+    x1 = pos[vi1]  # opposite 1
+    x2 = pos[vi2]  # edge start
+    x3 = pos[vi3]  # edge end
+
+    # Compute edge vectors
+    x02 = x2 - x0
+    x03 = x3 - x0
+    x13 = x3 - x1
+    x12 = x2 - x1
+    e = x3 - x2
+
+    # Compute normals
+    n1 = wp.cross(x02, x03)
+    n2 = wp.cross(x13, x12)
+
+    n1_norm = wp.length(n1)
+    n2_norm = wp.length(n2)
+    e_norm = wp.length(e)
+
+    # Early exit for degenerate cases
+    if n1_norm < eps or n2_norm < eps or e_norm < eps:
+        return wp.vec3(0.0), wp.vec3(0.0), wp.vec3(0.0), wp.vec3(0.0), wp.mat33(0.0), wp.mat33(0.0), wp.mat33(0.0), wp.mat33(0.0), wp.mat33(0.0), wp.mat33(0.0), wp.mat33(0.0), wp.mat33(0.0), wp.mat33(0.0), wp.mat33(0.0), wp.mat33(0.0), wp.mat33(0.0), wp.mat33(0.0), wp.mat33(0.0), wp.mat33(0.0), wp.mat33(0.0)
+
+    n1_hat = n1 / n1_norm
+    n2_hat = n2 / n2_norm
+    e_hat = e / e_norm
+
+    sin_theta = wp.dot(wp.cross(n1_hat, n2_hat), e_hat)
+    cos_theta = wp.dot(n1_hat, n2_hat)
+    theta = wp.atan2(sin_theta, cos_theta)
+
+    k = stiffness * edge_rest_length[bending_index]
+    dE_dtheta = k * (theta - edge_rest_angle[bending_index])
+
+    # Pre-compute skew matrices (shared across all angle derivative computations)
+    skew_e = wp.skew(e)
+    skew_x03 = wp.skew(x03)
+    skew_x02 = wp.skew(x02)
+    skew_x13 = wp.skew(x13)
+    skew_x12 = wp.skew(x12)
+    skew_n1 = wp.skew(n1_hat)
+    skew_n2 = wp.skew(n2_hat)
+
+    # Compute the derivatives of unit normals with respect to each vertex; required for computing angle derivatives
+    I3 = wp.identity(n=3, dtype=float)
+    Pn1 = I3 - wp.outer(n1_hat, n1_hat)
+    Pn2 = I3 - wp.outer(n2_hat, n2_hat)
+    Pe = I3 - wp.outer(e_hat, e_hat)
+
+    # \hat n_1、\hat n_2 的单位化导数：U(v)=(I-\hat v\hat v^T)/||v|| 乘以未单位化的导数
+    dn1hat_dx0 = (1.0 / n1_norm) * Pn1 * (-skew_x03 - skew_x02)
+    dn2hat_dx0 = wp.mat33(0.0)
+
+    dn1hat_dx1 = wp.mat33(0.0)
+    dn2hat_dx1 = (1.0 / n2_norm) * Pn2 * (-skew_x12 - skew_x13)
+
+    dn1hat_dx2 = (1.0 / n1_norm) * Pn1 * (-skew_x03)
+    dn2hat_dx2 = (1.0 / n2_norm) * Pn2 * (skew_x13)
+
+    dn1hat_dx3 = (1.0 / n1_norm) * Pn1 * (skew_x02)
+    dn2hat_dx3 = (1.0 / n2_norm) * Pn2 * (-skew_x12)
+
+    dehat_dx0 = wp.mat33(0.0)
+    dehat_dx1 = wp.mat33(0.0)
+    dehat_dx2 = (1.0 / e_norm) * Pe * (-I3)
+    dehat_dx3 = (1.0 / e_norm) * Pe * (I3)
+
+    # atan2 链式法则所需量：s=sinθ, c=cosθ, denom=s^2+c^2
+    c = cos_theta
+    s = sin_theta
+    denom = s * s + c * c
+
+    cross_n1n2 = wp.cross(n1_hat, n2_hat)
+
+    A0 = skew_n1 * dn2hat_dx0 - skew_n2 * dn1hat_dx0
+    ds_dx0 = wp.transpose(A0) * e_hat + wp.transpose(dehat_dx0) * cross_n1n2
+    dc_dx0 = wp.transpose(dn1hat_dx0) * n2_hat + wp.transpose(dn2hat_dx0) * n1_hat
+    dtheta_dx0 = (c * ds_dx0 - s * dc_dx0) * (1.0 / denom)
+
+    A1 = skew_n1 * dn2hat_dx1 - skew_n2 * dn1hat_dx1
+    ds_dx1 = wp.transpose(A1) * e_hat + wp.transpose(dehat_dx1) * cross_n1n2
+    dc_dx1 = wp.transpose(dn1hat_dx1) * n2_hat + wp.transpose(dn2hat_dx1) * n1_hat
+    dtheta_dx1 = (c * ds_dx1 - s * dc_dx1) * (1.0 / denom)
+
+    A2 = skew_n1 * dn2hat_dx2 - skew_n2 * dn1hat_dx2
+    ds_dx2 = wp.transpose(A2) * e_hat + wp.transpose(dehat_dx2) * cross_n1n2
+    dc_dx2 = wp.transpose(dn1hat_dx2) * n2_hat + wp.transpose(dn2hat_dx2) * n1_hat
+    dtheta_dx2 = (c * ds_dx2 - s * dc_dx2) * (1.0 / denom)
+
+    A3 = skew_n1 * dn2hat_dx3 - skew_n2 * dn1hat_dx3
+    ds_dx3 = wp.transpose(A3) * e_hat + wp.transpose(dehat_dx3) * cross_n1n2
+    dc_dx3 = wp.transpose(dn1hat_dx3) * n2_hat + wp.transpose(dn2hat_dx3) * n1_hat
+    dtheta_dx3 = (c * ds_dx3 - s * dc_dx3) * (1.0 / denom)
+
+    # 四顶点的角度梯度向量
+    g0 = dtheta_dx0
+    g1 = dtheta_dx1
+    g2 = dtheta_dx2
+    g3 = dtheta_dx3
+
+    # 四个力：f_i = -dE/dθ * g_i
+    f0 = -dE_dtheta * g0
+    f1 = -dE_dtheta * g1
+    f2 = -dE_dtheta * g2
+    f3 = -dE_dtheta * g3
+
+    # 16 个 Hessian 块：H_ij = k * g_i g_j^T（Gauss–Newton 外积）
+    h00 = k * wp.outer(g0, g0)
+    h01 = k * wp.outer(g0, g1)
+    h02 = k * wp.outer(g0, g2)
+    h03 = k * wp.outer(g0, g3)
+
+    h10 = k * wp.outer(g1, g0)
+    h11 = k * wp.outer(g1, g1)
+    h12 = k * wp.outer(g1, g2)
+    h13 = k * wp.outer(g1, g3)
+
+    h20 = k * wp.outer(g2, g0)
+    h21 = k * wp.outer(g2, g1)
+    h22 = k * wp.outer(g2, g2)
+    h23 = k * wp.outer(g2, g3)
+
+    h30 = k * wp.outer(g3, g0)
+    h31 = k * wp.outer(g3, g1)
+    h32 = k * wp.outer(g3, g2)
+    h33 = k * wp.outer(g3, g3)
+
+    return f0, f1, f2, f3, h00, h01, h02, h03, h10, h11, h12, h13, h20, h21, h22, h23, h30, h31, h32, h33
+    
 @wp.func
 def zcy_evaluate_stvk_force_hessian(
     face: int,
@@ -1709,256 +1719,6 @@ def apply_conservative_bound_truncation(
         return pos_new
 
 
-@wp.kernel
-def solve_trimesh_no_self_contact_tile(
-    dt: float,
-    particle_ids_in_color: wp.array(dtype=wp.int32),
-    pos_prev: wp.array(dtype=wp.vec3),
-    pos: wp.array(dtype=wp.vec3),
-    vel: wp.array(dtype=wp.vec3),
-    mass: wp.array(dtype=float),
-    inertia: wp.array(dtype=wp.vec3),
-    particle_flags: wp.array(dtype=wp.int32),
-    tri_indices: wp.array(dtype=wp.int32, ndim=2),
-    tri_poses: wp.array(dtype=wp.mat22),
-    tri_materials: wp.array(dtype=float, ndim=2),
-    tri_areas: wp.array(dtype=float),
-    edge_indices: wp.array(dtype=wp.int32, ndim=2),
-    edge_rest_angles: wp.array(dtype=float),
-    edge_rest_length: wp.array(dtype=float),
-    edge_bending_properties: wp.array(dtype=float, ndim=2),
-    adjacency: ForceElementAdjacencyInfo,
-    # contact info
-    particle_forces: wp.array(dtype=wp.vec3),
-    particle_hessians: wp.array(dtype=wp.mat33),
-    # output
-    pos_new: wp.array(dtype=wp.vec3),
-):
-    tid = wp.tid()
-    block_idx = tid // TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE
-    thread_idx = tid % TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE
-    particle_index = particle_ids_in_color[block_idx]
-
-    if not particle_flags[particle_index] & ParticleFlags.ACTIVE:
-        if thread_idx == 0:
-            pos_new[particle_index] = pos[particle_index]
-        return
-
-    particle_pos = pos[particle_index]
-
-    dt_sqr_reciprocal = 1.0 / (dt * dt)
-
-    # # inertia force and hessian
-    # f = mass[particle_index] * (inertia[particle_index] - pos[particle_index]) * (dt_sqr_reciprocal)
-    # h = mass[particle_index] * dt_sqr_reciprocal * wp.identity(n=3, dtype=float)
-
-    f = wp.vec3(0.0)
-    h = wp.mat33(0.0)
-
-    num_adj_faces = get_vertex_num_adjacent_faces(adjacency, particle_index)
-
-    batch_counter = wp.int32(0)
-
-    # loop through all the adjacent triangles using whole block
-    while batch_counter + thread_idx < num_adj_faces:
-        adj_tri_counter = thread_idx + batch_counter
-        batch_counter += TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE
-        # elastic force and hessian
-        tri_index, vertex_order = get_vertex_adjacent_face_id_order(adjacency, particle_index, adj_tri_counter)
-
-        f_tri, h_tri = evaluate_stvk_force_hessian(
-            tri_index,
-            vertex_order,
-            pos,
-            pos_prev,
-            tri_indices,
-            tri_poses[tri_index],
-            tri_areas[tri_index],
-            tri_materials[tri_index, 0],
-            tri_materials[tri_index, 1],
-            tri_materials[tri_index, 2],
-            dt,
-        )
-        # compute damping
-
-        f += f_tri
-        h += h_tri
-
-        # fmt: off
-        if wp.static("elasticity_force_hessian" in VBD_DEBUG_PRINTING_OPTIONS):
-            wp.printf(
-                "particle: %d, i_adj_tri: %d, particle_order: %d, \nforce:\n %f %f %f, \nhessian:, \n%f %f %f, \n%f %f %f, \n%f %f %f\n",
-                particle_index,
-                thread_idx,
-                vertex_order,
-                f[0], f[1], f[2], h[0, 0], h[0, 1], h[0, 2], h[1, 0], h[1, 1], h[1, 2], h[2, 0], h[2, 1], h[2, 2],
-            )
-            # fmt: on
-
-    #
-    batch_counter = wp.int32(0)
-    num_adj_edges = get_vertex_num_adjacent_edges(adjacency, particle_index)
-    while batch_counter + thread_idx < num_adj_edges:
-        adj_edge_counter = batch_counter + thread_idx
-        batch_counter += TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE
-        nei_edge_index, vertex_order_on_edge = get_vertex_adjacent_edge_id_order(
-            adjacency, particle_index, adj_edge_counter
-        )
-        if edge_bending_properties[nei_edge_index, 0] != 0.0:
-            f_edge, h_edge = evaluate_dihedral_angle_based_bending_force_hessian(
-                nei_edge_index,
-                vertex_order_on_edge,
-                pos,
-                pos_prev,
-                edge_indices,
-                edge_rest_angles,
-                edge_rest_length,
-                edge_bending_properties[nei_edge_index, 0],
-                edge_bending_properties[nei_edge_index, 1],
-                dt,
-            )
-
-            f += f_edge
-            h += h_edge
-
-    f_tile = wp.tile(f, preserve_type=True)
-    h_tile = wp.tile(h, preserve_type=True)
-
-    f_total = wp.tile_reduce(wp.add, f_tile)[0]
-    h_total = wp.tile_reduce(wp.add, h_tile)[0]
-
-    if thread_idx == 0:
-        h_total = (
-            h_total
-            + mass[particle_index] * dt_sqr_reciprocal * wp.identity(n=3, dtype=float)
-            + particle_hessians[particle_index]
-        )
-        if abs(wp.determinant(h_total)) > 1e-5:
-            h_inv = wp.inverse(h_total)
-            f_total = (
-                f_total
-                + mass[particle_index] * (inertia[particle_index] - pos[particle_index]) * (dt_sqr_reciprocal)
-                + particle_forces[particle_index]
-            )
-
-            pos_new[particle_index] = particle_pos + h_inv * f_total
-
-
-@wp.kernel
-def solve_trimesh_no_self_contact(
-    dt: float,
-    particle_ids_in_color: wp.array(dtype=wp.int32),
-    pos_prev: wp.array(dtype=wp.vec3),
-    pos: wp.array(dtype=wp.vec3),
-    vel: wp.array(dtype=wp.vec3),
-    mass: wp.array(dtype=float),
-    inertia: wp.array(dtype=wp.vec3),
-    particle_flags: wp.array(dtype=wp.int32),
-    tri_indices: wp.array(dtype=wp.int32, ndim=2),
-    tri_poses: wp.array(dtype=wp.mat22),
-    tri_materials: wp.array(dtype=float, ndim=2),
-    tri_areas: wp.array(dtype=float),
-    edge_indices: wp.array(dtype=wp.int32, ndim=2),
-    edge_rest_angles: wp.array(dtype=float),
-    edge_rest_length: wp.array(dtype=float),
-    edge_bending_properties: wp.array(dtype=float, ndim=2),
-    adjacency: ForceElementAdjacencyInfo,
-    # contact info
-    particle_forces: wp.array(dtype=wp.vec3),
-    particle_hessians: wp.array(dtype=wp.mat33),
-    # output
-    pos_new: wp.array(dtype=wp.vec3),
-):
-    tid = wp.tid()
-
-    particle_index = particle_ids_in_color[tid]
-
-    if not particle_flags[particle_index] & ParticleFlags.ACTIVE:
-        pos_new[particle_index] = pos[particle_index]
-        return
-
-    particle_pos = pos[particle_index]
-
-    dt_sqr_reciprocal = 1.0 / (dt * dt)
-
-    # inertia force and hessian
-    f = mass[particle_index] * (inertia[particle_index] - pos[particle_index]) * (dt_sqr_reciprocal)
-    h = mass[particle_index] * dt_sqr_reciprocal * wp.identity(n=3, dtype=float)
-
-    # elastic force and hessian
-    for i_adj_tri in range(get_vertex_num_adjacent_faces(adjacency, particle_index)):
-        tri_id, particle_order = get_vertex_adjacent_face_id_order(adjacency, particle_index, i_adj_tri)
-
-        # fmt: off
-        if wp.static("connectivity" in VBD_DEBUG_PRINTING_OPTIONS):
-            wp.printf(
-                "particle: %d | num_adj_faces: %d | ",
-                particle_index,
-                get_vertex_num_adjacent_faces(particle_index, adjacency),
-            )
-            wp.printf("i_face: %d | face id: %d | v_order: %d | ", i_adj_tri, tri_id, particle_order)
-            wp.printf(
-                "face: %d %d %d\n",
-                tri_indices[tri_id, 0],
-                tri_indices[tri_id, 1],
-                tri_indices[tri_id, 2],
-            )
-        # fmt: on
-
-        f_tri, h_tri = evaluate_stvk_force_hessian(
-            tri_id,
-            particle_order,
-            pos,
-            pos_prev,
-            tri_indices,
-            tri_poses[tri_id],
-            tri_areas[tri_id],
-            tri_materials[tri_id, 0],
-            tri_materials[tri_id, 1],
-            tri_materials[tri_id, 2],
-            dt,
-        )
-
-        f = f + f_tri
-        h = h + h_tri
-
-        # fmt: off
-        if wp.static("elasticity_force_hessian" in VBD_DEBUG_PRINTING_OPTIONS):
-            wp.printf(
-                "particle: %d, i_adj_tri: %d, particle_order: %d, \nforce:\n %f %f %f, \nhessian:, \n%f %f %f, \n%f %f %f, \n%f %f %f\n",
-                particle_index,
-                i_adj_tri,
-                particle_order,
-                f[0], f[1], f[2], h[0, 0], h[0, 1], h[0, 2], h[1, 0], h[1, 1], h[1, 2], h[2, 0], h[2, 1], h[2, 2],
-            )
-        # fmt: on
-
-    for i_adj_edge in range(get_vertex_num_adjacent_edges(adjacency, particle_index)):
-        nei_edge_index, vertex_order_on_edge = get_vertex_adjacent_edge_id_order(adjacency, particle_index, i_adj_edge)
-        if edge_bending_properties[nei_edge_index, 0] != 0.0:
-            f_edge, h_edge = evaluate_dihedral_angle_based_bending_force_hessian(
-                nei_edge_index,
-                vertex_order_on_edge,
-                pos,
-                pos_prev,
-                edge_indices,
-                edge_rest_angles,
-                edge_rest_length,
-                edge_bending_properties[nei_edge_index, 0],
-                edge_bending_properties[nei_edge_index, 1],
-                dt,
-            )
-
-            f += f_edge
-            h += h_edge
-
-    h += particle_hessians[particle_index]
-    f += particle_forces[particle_index]
-
-    if abs(wp.determinant(h)) > 1e-5:
-        hInv = wp.inverse(h)
-        pos_new[particle_index] = particle_pos + hInv * f
-
 
 @wp.kernel
 def copy_particle_positions_back(
@@ -2586,6 +2346,7 @@ def zcy_assemble_inertia_and_gravity_add_force(
     spring_forces: wp.array(dtype=wp.vec3),
     edge_contact_forces: wp.array(dtype=wp.vec3),
     vt_contact_forces: wp.array(dtype=wp.vec3),
+    bending_forces: wp.array(dtype=wp.vec3),
     # fixed particle
     free_particle_offset: wp.array(dtype=wp.int32),
     # outputs: 
@@ -2599,7 +2360,7 @@ def zcy_assemble_inertia_and_gravity_add_force(
     # inertia
     inertia = pos_warp[free_particle] - pos_prev_warp[free_particle] - dt * vel_warp[free_particle]
 
-    b[tid] = -1.0/dt/dt * mass * inertia + spring_forces[free_particle] + edge_contact_forces[free_particle] + vt_contact_forces[free_particle] + gravity
+    b[tid] = -1.0/dt/dt * mass * inertia + spring_forces[free_particle] + edge_contact_forces[free_particle] + vt_contact_forces[free_particle] + bending_forces[free_particle] + gravity
 
 @wp.kernel
 def zcy_residual_computation(
@@ -2864,412 +2625,116 @@ def zcy_accumulate_stvk_force_and_hessian(
     stvk_hessian_cols[base + 8] = c
     stvk_hessian_values[base + 8] = h_cc
 
-
-# zcy
-
-
-
-@wp.func
-def evaluate_spring_force_and_hessian(
-    particle_idx: int,
-    spring_idx: int,
-    dt: float,
+@wp.kernel
+def zcy_accumulate_bending_force_and_hessian(
     pos: wp.array(dtype=wp.vec3),
-    pos_prev: wp.array(dtype=wp.vec3),
-    spring_indices: wp.array(dtype=int),
-    spring_rest_length: wp.array(dtype=float),
-    spring_stiffness: wp.array(dtype=float),
-    spring_damping: wp.array(dtype=float),
+    edge_indices: wp.array(dtype=wp.int32, ndim=2),
+    edge_rest_angle: wp.array(dtype=float),
+    edge_rest_length: wp.array(dtype=float),
+    edge_bending_properties: wp.array(dtype=float, ndim=2),
+    bending_forces: wp.array(dtype=wp.vec3),
+    bending_hessian_values: wp.array(dtype=wp.mat33),
+    bending_hessian_rows: wp.array(dtype=int),
+    bending_hessian_cols: wp.array(dtype=int),
 ):
-    v0 = spring_indices[spring_idx * 2]
-    v1 = spring_indices[spring_idx * 2 + 1]
+    edge_index = wp.tid()
 
-    diff = pos[v0] - pos[v1]
-    l = wp.length(diff)
-    l0 = spring_rest_length[spring_idx]
+    # Skip invalid edges (boundary edges with missing opposite vertices)
+    if edge_indices[edge_index, 0] == -1 or edge_indices[edge_index, 1] == -1:
+        return
 
-    force_sign = 1.0 if particle_idx == v0 else -1.0
+    # 当前边的四个顶点
+    i = edge_indices[edge_index, 0]
+    j = edge_indices[edge_index, 1]
+    k = edge_indices[edge_index, 2]
+    l = edge_indices[edge_index, 3]
 
-    spring_force = force_sign * spring_stiffness[spring_idx] * (l0 - l) / l * diff
-    spring_hessian = spring_stiffness[spring_idx] * (
-        wp.identity(3, float) - (l0 / l) * (wp.identity(3, float) - wp.outer(diff, diff) / (l * l))
+    ke = edge_bending_properties[edge_index, 0]
+
+    # 单元评估：返回四力与 16 个 3x3 Hessian 子块
+    f0, f1, f2, f3, h00, h01, h02, h03, h10, h11, h12, h13, h20, h21, h22, h23, h30, h31, h32, h33 = zcy_evaluate_dihedral_angle_based_bending_force_hessian(
+        edge_index,
+        pos,
+        edge_indices,
+        edge_rest_angle,
+        edge_rest_length,
+        ke,
     )
 
-    # compute damping
-    h_d = spring_hessian * (spring_damping[spring_idx] / dt)
+    # 原子累加到四个顶点
+    wp.atomic_add(bending_forces, i, f0)
+    wp.atomic_add(bending_forces, j, f1)
+    wp.atomic_add(bending_forces, k, f2)
+    wp.atomic_add(bending_forces, l, f3)
 
-    f_d = h_d * (pos_prev[particle_idx] - pos[particle_idx])
+    # COO 写入：每条边写 16 个块
+    base = edge_index * 16
 
-    spring_force = spring_force + f_d
-    spring_hessian = spring_hessian + h_d
+    bending_hessian_rows[base + 0] = i
+    bending_hessian_cols[base + 0] = i
+    bending_hessian_values[base + 0] = h00
 
-    return spring_force, spring_hessian
+    bending_hessian_rows[base + 1] = i
+    bending_hessian_cols[base + 1] = j
+    bending_hessian_values[base + 1] = h01
 
+    bending_hessian_rows[base + 2] = i
+    bending_hessian_cols[base + 2] = k
+    bending_hessian_values[base + 2] = h02
 
-@wp.kernel
-def accumulate_spring_force_and_hessian(
-    # inputs
-    dt: float,
-    current_color: int,
-    pos_prev: wp.array(dtype=wp.vec3),
-    pos: wp.array(dtype=wp.vec3),
-    particle_ids_in_color: wp.array(dtype=int),
-    adjacency: ForceElementAdjacencyInfo,
-    # spring constraints
-    spring_indices: wp.array(dtype=int),
-    spring_rest_length: wp.array(dtype=float),
-    spring_stiffness: wp.array(dtype=float),
-    spring_damping: wp.array(dtype=float),
-    # outputs: particle force and hessian
-    particle_forces: wp.array(dtype=wp.vec3),
-    particle_hessians: wp.array(dtype=wp.mat33),
-):
-    t_id = wp.tid()
+    bending_hessian_rows[base + 3] = i
+    bending_hessian_cols[base + 3] = l
+    bending_hessian_values[base + 3] = h03
 
-    particle_index = particle_ids_in_color[t_id]
+    bending_hessian_rows[base + 4] = j
+    bending_hessian_cols[base + 4] = i
+    bending_hessian_values[base + 4] = h10
 
-    num_adj_springs = get_vertex_num_adjacent_springs(adjacency, particle_index)
-    for spring_counter in range(num_adj_springs):
-        spring_index = get_vertex_adjacent_spring_id(adjacency, particle_index, spring_counter)
-        spring_force, spring_hessian = evaluate_spring_force_and_hessian(
-            particle_index,
-            spring_index,
-            dt,
-            pos,
-            pos_prev,
-            spring_indices,
-            spring_rest_length,
-            spring_stiffness,
-            spring_damping,
-        )
+    bending_hessian_rows[base + 5] = j
+    bending_hessian_cols[base + 5] = j
+    bending_hessian_values[base + 5] = h11
 
-        particle_forces[particle_index] = particle_forces[particle_index] + spring_force
-        particle_hessians[particle_index] = particle_hessians[particle_index] + spring_hessian
+    bending_hessian_rows[base + 6] = j
+    bending_hessian_cols[base + 6] = k
+    bending_hessian_values[base + 6] = h12
 
+    bending_hessian_rows[base + 7] = j
+    bending_hessian_cols[base + 7] = l
+    bending_hessian_values[base + 7] = h13
 
-@wp.kernel
-def accumulate_contact_force_and_hessian_no_self_contact(
-    # inputs
-    dt: float,
-    current_color: int,
-    pos_prev: wp.array(dtype=wp.vec3),
-    pos: wp.array(dtype=wp.vec3),
-    particle_colors: wp.array(dtype=int),
-    # body-particle contact
-    soft_contact_ke: float,
-    soft_contact_kd: float,
-    friction_mu: float,
-    friction_epsilon: float,
-    particle_radius: wp.array(dtype=float),
-    soft_contact_particle: wp.array(dtype=int),
-    contact_count: wp.array(dtype=int),
-    contact_max: int,
-    shape_material_mu: wp.array(dtype=float),
-    shape_body: wp.array(dtype=int),
-    body_q: wp.array(dtype=wp.transform),
-    body_q_prev: wp.array(dtype=wp.transform),
-    body_qd: wp.array(dtype=wp.spatial_vector),
-    body_com: wp.array(dtype=wp.vec3),
-    contact_shape: wp.array(dtype=int),
-    contact_body_pos: wp.array(dtype=wp.vec3),
-    contact_body_vel: wp.array(dtype=wp.vec3),
-    contact_normal: wp.array(dtype=wp.vec3),
-    # outputs: particle force and hessian
-    particle_forces: wp.array(dtype=wp.vec3),
-    particle_hessians: wp.array(dtype=wp.mat33),
-):
-    t_id = wp.tid()
+    bending_hessian_rows[base + 8] = k
+    bending_hessian_cols[base + 8] = i
+    bending_hessian_values[base + 8] = h20
 
-    particle_body_contact_count = min(contact_max, contact_count[0])
+    bending_hessian_rows[base + 9] = k
+    bending_hessian_cols[base + 9] = j
+    bending_hessian_values[base + 9] = h21
 
-    if t_id < particle_body_contact_count:
-        particle_idx = soft_contact_particle[t_id]
+    bending_hessian_rows[base + 10] = k
+    bending_hessian_cols[base + 10] = k
+    bending_hessian_values[base + 10] = h22
 
-        if particle_colors[particle_idx] == current_color:
-            body_contact_force, body_contact_hessian = evaluate_body_particle_contact(
-                particle_idx,
-                pos[particle_idx],
-                pos_prev[particle_idx],
-                t_id,
-                soft_contact_ke,
-                soft_contact_kd,
-                friction_mu,
-                friction_epsilon,
-                particle_radius,
-                shape_material_mu,
-                shape_body,
-                body_q,
-                body_q_prev,
-                body_qd,
-                body_com,
-                contact_shape,
-                contact_body_pos,
-                contact_body_vel,
-                contact_normal,
-                dt,
-            )
-            wp.atomic_add(particle_forces, particle_idx, body_contact_force)
-            wp.atomic_add(particle_hessians, particle_idx, body_contact_hessian)
+    bending_hessian_rows[base + 11] = k
+    bending_hessian_cols[base + 11] = l
+    bending_hessian_values[base + 11] = h23
 
+    bending_hessian_rows[base + 12] = l
+    bending_hessian_cols[base + 12] = i
+    bending_hessian_values[base + 12] = h30
 
-@wp.kernel
-def solve_trimesh_with_self_contact_penetration_free(
-    dt: float,
-    particle_ids_in_color: wp.array(dtype=wp.int32),
-    pos_prev: wp.array(dtype=wp.vec3),
-    pos: wp.array(dtype=wp.vec3),
-    vel: wp.array(dtype=wp.vec3),
-    mass: wp.array(dtype=float),
-    inertia: wp.array(dtype=wp.vec3),
-    particle_flags: wp.array(dtype=wp.int32),
-    tri_indices: wp.array(dtype=wp.int32, ndim=2),
-    tri_poses: wp.array(dtype=wp.mat22),
-    tri_materials: wp.array(dtype=float, ndim=2),
-    tri_areas: wp.array(dtype=float),
-    edge_indices: wp.array(dtype=wp.int32, ndim=2),
-    edge_rest_angles: wp.array(dtype=float),
-    edge_rest_length: wp.array(dtype=float),
-    edge_bending_properties: wp.array(dtype=float, ndim=2),
-    adjacency: ForceElementAdjacencyInfo,
-    particle_forces: wp.array(dtype=wp.vec3),
-    particle_hessians: wp.array(dtype=wp.mat33),
-    pos_prev_collision_detection: wp.array(dtype=wp.vec3),
-    particle_conservative_bounds: wp.array(dtype=float),
-    # output
-    pos_new: wp.array(dtype=wp.vec3),
-):
-    t_id = wp.tid()
+    bending_hessian_rows[base + 13] = l
+    bending_hessian_cols[base + 13] = j
+    bending_hessian_values[base + 13] = h31
 
-    particle_index = particle_ids_in_color[t_id]
-    particle_pos = pos[particle_index]
+    bending_hessian_rows[base + 14] = l
+    bending_hessian_cols[base + 14] = k
+    bending_hessian_values[base + 14] = h32
 
-    if not particle_flags[particle_index] & ParticleFlags.ACTIVE:
-        pos_new[particle_index] = particle_pos
-        return
+    bending_hessian_rows[base + 15] = l
+    bending_hessian_cols[base + 15] = l
+    bending_hessian_values[base + 15] = h33
 
-    dt_sqr_reciprocal = 1.0 / (dt * dt)
-
-    # inertia force and hessian
-    f = mass[particle_index] * (inertia[particle_index] - pos[particle_index]) * (dt_sqr_reciprocal)
-    h = mass[particle_index] * dt_sqr_reciprocal * wp.identity(n=3, dtype=float)
-
-    # fmt: off
-    if wp.static("inertia_force_hessian" in VBD_DEBUG_PRINTING_OPTIONS):
-        wp.printf(
-            "particle: %d after accumulate inertia\nforce:\n %f %f %f, \nhessian:, \n%f %f %f, \n%f %f %f, \n%f %f %f\n",
-            particle_index,
-            f[0], f[1], f[2], h[0, 0], h[0, 1], h[0, 2], h[1, 0], h[1, 1], h[1, 2], h[2, 0], h[2, 1], h[2, 2],
-        )
-
-    # elastic force and hessian
-    for i_adj_tri in range(get_vertex_num_adjacent_faces(adjacency, particle_index)):
-        tri_index, vertex_order = get_vertex_adjacent_face_id_order(adjacency, particle_index, i_adj_tri)
-
-        # fmt: off
-        if wp.static("connectivity" in VBD_DEBUG_PRINTING_OPTIONS):
-            wp.printf(
-                "particle: %d | num_adj_faces: %d | ",
-                particle_index,
-                get_vertex_num_adjacent_faces(particle_index, adjacency),
-            )
-            wp.printf("i_face: %d | face id: %d | v_order: %d | ", i_adj_tri, tri_index, vertex_order)
-            wp.printf(
-                "face: %d %d %d\n",
-                tri_indices[tri_index, 0],
-                tri_indices[tri_index, 1],
-                tri_indices[tri_index, 2],
-            )
-        # fmt: on
-
-        f_tri, h_tri = evaluate_stvk_force_hessian(
-            tri_index,
-            vertex_order,
-            pos,
-            pos_prev,
-            tri_indices,
-            tri_poses[tri_index],
-            tri_areas[tri_index],
-            tri_materials[tri_index, 0],
-            tri_materials[tri_index, 1],
-            tri_materials[tri_index, 2],
-            dt,
-        )
-
-        f = f + f_tri
-        h = h + h_tri
-
-
-    for i_adj_edge in range(get_vertex_num_adjacent_edges(adjacency, particle_index)):
-        nei_edge_index, vertex_order_on_edge = get_vertex_adjacent_edge_id_order(adjacency, particle_index, i_adj_edge)
-        # vertex is on the edge; otherwise it only effects the bending energy n
-        if edge_bending_properties[nei_edge_index, 0] != 0.0:
-            f_edge, h_edge = evaluate_dihedral_angle_based_bending_force_hessian(
-                nei_edge_index, vertex_order_on_edge, pos, pos_prev, edge_indices, edge_rest_angles, edge_rest_length,
-                edge_bending_properties[nei_edge_index, 0], edge_bending_properties[nei_edge_index, 1], dt
-            )
-
-            f = f + f_edge
-            h = h + h_edge
-
-    # fmt: off
-    if wp.static("overall_force_hessian" in VBD_DEBUG_PRINTING_OPTIONS):
-        wp.printf(
-            "vertex: %d final\noverall force:\n %f %f %f, \noverall hessian:, \n%f %f %f, \n%f %f %f, \n%f %f %f\n",
-            particle_index,
-            f[0], f[1], f[2], h[0, 0], h[0, 1], h[0, 2], h[1, 0], h[1, 1], h[1, 2], h[2, 0], h[2, 1], h[2, 2],
-        )
-
-    # # fmt: on
-    h = h + particle_hessians[particle_index]
-    f = f + particle_forces[particle_index]
-
-    if abs(wp.determinant(h)) > 1e-5:
-        h_inv = wp.inverse(h)
-        particle_pos_new = pos[particle_index] + h_inv * f
-
-        pos_new[particle_index] = apply_conservative_bound_truncation(
-            particle_index, particle_pos_new, pos_prev_collision_detection, particle_conservative_bounds
-        )
-
-
-@wp.kernel
-def solve_trimesh_with_self_contact_penetration_free_tile(
-    dt: float,
-    particle_ids_in_color: wp.array(dtype=wp.int32),
-    pos_prev: wp.array(dtype=wp.vec3),
-    pos: wp.array(dtype=wp.vec3),
-    vel: wp.array(dtype=wp.vec3),
-    mass: wp.array(dtype=float),
-    inertia: wp.array(dtype=wp.vec3),
-    particle_flags: wp.array(dtype=wp.int32),
-    tri_indices: wp.array(dtype=wp.int32, ndim=2),
-    tri_poses: wp.array(dtype=wp.mat22),
-    tri_materials: wp.array(dtype=float, ndim=2),
-    tri_areas: wp.array(dtype=float),
-    edge_indices: wp.array(dtype=wp.int32, ndim=2),
-    edge_rest_angles: wp.array(dtype=float),
-    edge_rest_length: wp.array(dtype=float),
-    edge_bending_properties: wp.array(dtype=float, ndim=2),
-    adjacency: ForceElementAdjacencyInfo,
-    particle_forces: wp.array(dtype=wp.vec3),
-    particle_hessians: wp.array(dtype=wp.mat33),
-    pos_prev_collision_detection: wp.array(dtype=wp.vec3),
-    particle_conservative_bounds: wp.array(dtype=float),
-    # output
-    pos_new: wp.array(dtype=wp.vec3),
-):
-    tid = wp.tid()
-    block_idx = tid // TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE
-    thread_idx = tid % TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE
-    particle_index = particle_ids_in_color[block_idx]
-
-    if not particle_flags[particle_index] & ParticleFlags.ACTIVE:
-        if thread_idx == 0:
-            pos_new[particle_index] = pos[particle_index]
-        return
-
-    particle_pos = pos[particle_index]
-
-    dt_sqr_reciprocal = 1.0 / (dt * dt)
-
-    # elastic force and hessian
-    num_adj_faces = get_vertex_num_adjacent_faces(adjacency, particle_index)
-
-    f = wp.vec3(0.0)
-    h = wp.mat33(0.0)
-
-    batch_counter = wp.int32(0)
-
-    # loop through all the adjacent triangles using whole block
-    while batch_counter + thread_idx < num_adj_faces:
-        adj_tri_counter = thread_idx + batch_counter
-        batch_counter += TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE
-        # elastic force and hessian
-        tri_index, vertex_order = get_vertex_adjacent_face_id_order(adjacency, particle_index, adj_tri_counter)
-
-        # fmt: off
-        if wp.static("connectivity" in VBD_DEBUG_PRINTING_OPTIONS):
-            wp.printf(
-                "particle: %d | num_adj_faces: %d | ",
-                particle_index,
-                get_vertex_num_adjacent_faces(particle_index, adjacency),
-            )
-            wp.printf("i_face: %d | face id: %d | v_order: %d | ", adj_tri_counter, tri_index, vertex_order)
-            wp.printf(
-                "face: %d %d %d\n",
-                tri_indices[tri_index, 0],
-                tri_indices[tri_index, 1],
-                tri_indices[tri_index, 2],
-            )
-        # fmt: on
-
-        f_tri, h_tri = evaluate_stvk_force_hessian(
-            tri_index,
-            vertex_order,
-            pos,
-            pos_prev,
-            tri_indices,
-            tri_poses[tri_index],
-            tri_areas[tri_index],
-            tri_materials[tri_index, 0],
-            tri_materials[tri_index, 1],
-            tri_materials[tri_index, 2],
-            dt,
-        )
-
-        f += f_tri
-        h += h_tri
-
-    batch_counter = wp.int32(0)
-    num_adj_edges = get_vertex_num_adjacent_edges(adjacency, particle_index)
-    while batch_counter + thread_idx < num_adj_edges:
-        adj_edge_counter = batch_counter + thread_idx
-        batch_counter += TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE
-        nei_edge_index, vertex_order_on_edge = get_vertex_adjacent_edge_id_order(
-            adjacency, particle_index, adj_edge_counter
-        )
-        if edge_bending_properties[nei_edge_index, 0] != 0.0:
-            f_edge, h_edge = evaluate_dihedral_angle_based_bending_force_hessian(
-                nei_edge_index,
-                vertex_order_on_edge,
-                pos,
-                pos_prev,
-                edge_indices,
-                edge_rest_angles,
-                edge_rest_length,
-                edge_bending_properties[nei_edge_index, 0],
-                edge_bending_properties[nei_edge_index, 1],
-                dt,
-            )
-
-            f += f_edge
-            h += h_edge
-
-    f_tile = wp.tile(f, preserve_type=True)
-    h_tile = wp.tile(h, preserve_type=True)
-
-    f_total = wp.tile_reduce(wp.add, f_tile)[0]
-    h_total = wp.tile_reduce(wp.add, h_tile)[0]
-
-    if thread_idx == 0:
-        h_total = (
-            h_total
-            + mass[particle_index] * dt_sqr_reciprocal * wp.identity(n=3, dtype=float)
-            + particle_hessians[particle_index]
-        )
-        if abs(wp.determinant(h_total)) > 1e-5:
-            h_inv = wp.inverse(h_total)
-            f_total = (
-                f_total
-                + mass[particle_index] * (inertia[particle_index] - pos[particle_index]) * (dt_sqr_reciprocal)
-                + particle_forces[particle_index]
-            )
-            particle_pos_new = particle_pos + h_inv * f_total
-
-            pos_new[particle_index] = apply_conservative_bound_truncation(
-                particle_index, particle_pos_new, pos_prev_collision_detection, particle_conservative_bounds
-            )
-
+# zcy
 
 class zcy_SolverVBD(SolverBase):
 
@@ -3374,10 +2839,6 @@ class zcy_SolverVBD(SolverBase):
         self.spring = 0
         self.num_spring = self.spring_rest_length.shape[0]
         self.num_triangles = self.model.tri_indices.shape[0]
-        # contact num
-        self.num_contact = self.collision_evaluation_kernel_launch_size
-        self.num_ee_contact = self.model.edge_count * NUM_THREADS_PER_COLLISION_PRIMITIVE
-        self.num_vt_contact = self.model.particle_count * NUM_THREADS_PER_COLLISION_PRIMITIVE
 
         # spaces for particle force and hessian
         self.particle_forces = wp.zeros(self.free_particle_num, dtype=wp.vec3, device=self.device)
@@ -3397,136 +2858,19 @@ class zcy_SolverVBD(SolverBase):
             self.spring_hessian_rows = wp.zeros(self.num_triangles*9, dtype=int, device=self.device)
             self.spring_hessian_cols = wp.zeros(self.num_triangles*9, dtype=int, device=self.device)
 
-        # edge_contact
-        self.edge_contact_forces = wp.zeros(self.num_particle, dtype=wp.vec3, device=self.device)
-        self.edge_contact_hessian_values = wp.zeros(self.num_ee_contact*16, dtype=wp.mat33, device=self.device)
-        self.edge_contact_hessian_rows = wp.zeros(self.num_ee_contact*16, dtype=int, device=self.device)
-        self.edge_contact_hessian_cols = wp.zeros(self.num_ee_contact*16, dtype=int, device=self.device)
-        # vertex-triangle_contact
-        self.vt_contact_forces = wp.zeros(self.num_particle, dtype=wp.vec3, device=self.device)
-        self.vt_contact_hessian_values = wp.zeros(self.num_vt_contact*16, dtype=wp.mat33, device=self.device)
-        self.vt_contact_hessian_rows = wp.zeros(self.num_vt_contact*16, dtype=int, device=self.device)
-        self.vt_contact_hessian_cols = wp.zeros(self.num_vt_contact*16, dtype=int, device=self.device)
+        # bending
+        self.bending_forces = wp.zeros(self.num_particle, dtype=wp.vec3, device=self.device)
+        self.bending_hessian_values = wp.zeros(self.num_spring*16, dtype=wp.mat33, device=self.device)
+        self.bending_hessian_rows = wp.zeros(self.num_spring*16, dtype=int, device=self.device)
+        self.bending_hessian_cols = wp.zeros(self.num_spring*16, dtype=int, device=self.device)
 
         # static matrix
         self.zcy_compute_static_matrix(dt, mass)
 
+        # contact
+        self.zcy_pre_and_refit_contact_size()
+
         # endregion: my
-        
-    def compute_force_element_adjacency(self, model):
-        adjacency = ForceElementAdjacencyInfo()
-        edges_array = model.edge_indices.to("cpu")
-        spring_array = model.spring_indices.to("cpu")
-        face_indices = model.tri_indices.to("cpu")
-
-        with wp.ScopedDevice("cpu"):
-            if edges_array.size:
-                # build vertex-edge adjacency data
-                num_vertex_adjacent_edges = wp.zeros(shape=(self.model.particle_count,), dtype=wp.int32)
-
-                wp.launch(
-                    kernel=self.count_num_adjacent_edges,
-                    inputs=[edges_array, num_vertex_adjacent_edges],
-                    dim=1,
-                )
-
-                num_vertex_adjacent_edges = num_vertex_adjacent_edges.numpy()
-                vertex_adjacent_edges_offsets = np.empty(shape=(self.model.particle_count + 1,), dtype=wp.int32)
-                vertex_adjacent_edges_offsets[1:] = np.cumsum(2 * num_vertex_adjacent_edges)[:]
-                vertex_adjacent_edges_offsets[0] = 0
-                adjacency.v_adj_edges_offsets = wp.array(vertex_adjacent_edges_offsets, dtype=wp.int32)
-
-                # temporal variables to record how much adjacent edges has been filled to each vertex
-                vertex_adjacent_edges_fill_count = wp.zeros(shape=(self.model.particle_count,), dtype=wp.int32)
-
-                edge_adjacency_array_size = 2 * num_vertex_adjacent_edges.sum()
-                # vertex order: o0: 0, o1: 1, v0: 2, v1: 3,
-                adjacency.v_adj_edges = wp.empty(shape=(edge_adjacency_array_size,), dtype=wp.int32)
-
-                wp.launch(
-                    kernel=self.fill_adjacent_edges,
-                    inputs=[
-                        edges_array,
-                        adjacency.v_adj_edges_offsets,
-                        vertex_adjacent_edges_fill_count,
-                        adjacency.v_adj_edges,
-                    ],
-                    dim=1,
-                )
-            else:
-                adjacency.v_adj_edges_offsets = wp.empty(shape=(0,), dtype=wp.int32)
-                adjacency.v_adj_edges = wp.empty(shape=(0,), dtype=wp.int32)
-
-            if face_indices.size:
-                # compute adjacent triangles
-                # count number of adjacent faces for each vertex
-                num_vertex_adjacent_faces = wp.zeros(shape=(self.model.particle_count,), dtype=wp.int32)
-                wp.launch(kernel=self.count_num_adjacent_faces, inputs=[face_indices, num_vertex_adjacent_faces], dim=1)
-
-                # preallocate memory based on counting results
-                num_vertex_adjacent_faces = num_vertex_adjacent_faces.numpy()
-                vertex_adjacent_faces_offsets = np.empty(shape=(self.model.particle_count + 1,), dtype=wp.int32)
-                vertex_adjacent_faces_offsets[1:] = np.cumsum(2 * num_vertex_adjacent_faces)[:]
-                vertex_adjacent_faces_offsets[0] = 0
-                adjacency.v_adj_faces_offsets = wp.array(vertex_adjacent_faces_offsets, dtype=wp.int32)
-
-                vertex_adjacent_faces_fill_count = wp.zeros(shape=(self.model.particle_count,), dtype=wp.int32)
-
-                face_adjacency_array_size = 2 * num_vertex_adjacent_faces.sum()
-                # (face, vertex_order) * num_adj_faces * num_particles
-                # vertex order: v0: 0, v1: 1, o0: 2, v2: 3
-                adjacency.v_adj_faces = wp.empty(shape=(face_adjacency_array_size,), dtype=wp.int32)
-
-                wp.launch(
-                    kernel=self.fill_adjacent_faces,
-                    inputs=[
-                        face_indices,
-                        adjacency.v_adj_faces_offsets,
-                        vertex_adjacent_faces_fill_count,
-                        adjacency.v_adj_faces,
-                    ],
-                    dim=1,
-                )
-            else:
-                adjacency.v_adj_faces_offsets = wp.empty(shape=(0,), dtype=wp.int32)
-                adjacency.v_adj_faces = wp.empty(shape=(0,), dtype=wp.int32)
-
-            if spring_array.size:
-                # build vertex-springs adjacency data
-                num_vertex_adjacent_spring = wp.zeros(shape=(self.model.particle_count,), dtype=wp.int32)
-
-                wp.launch(
-                    kernel=self.count_num_adjacent_springs,
-                    inputs=[spring_array, num_vertex_adjacent_spring],
-                    dim=1,
-                )
-
-                num_vertex_adjacent_spring = num_vertex_adjacent_spring.numpy()
-                vertex_adjacent_springs_offsets = np.empty(shape=(self.model.particle_count + 1,), dtype=wp.int32)
-                vertex_adjacent_springs_offsets[1:] = np.cumsum(num_vertex_adjacent_spring)[:]
-                vertex_adjacent_springs_offsets[0] = 0
-                adjacency.v_adj_springs_offsets = wp.array(vertex_adjacent_springs_offsets, dtype=wp.int32)
-
-                # temporal variables to record how much adjacent springs has been filled to each vertex
-                vertex_adjacent_springs_fill_count = wp.zeros(shape=(self.model.particle_count,), dtype=wp.int32)
-                adjacency.v_adj_springs = wp.empty(shape=(num_vertex_adjacent_spring.sum(),), dtype=wp.int32)
-
-                wp.launch(
-                    kernel=self.fill_adjacent_springs,
-                    inputs=[
-                        spring_array,
-                        adjacency.v_adj_springs_offsets,
-                        vertex_adjacent_springs_fill_count,
-                        adjacency.v_adj_springs,
-                    ],
-                    dim=1,
-                )
-
-            else:
-                adjacency.v_adj_springs_offsets = wp.empty(shape=(0,), dtype=wp.int32)
-                adjacency.v_adj_springs = wp.empty(shape=(0,), dtype=wp.int32)
-
-        return adjacency
 
 # zcy
     def zcy_simulate_one_step(
@@ -3572,6 +2916,18 @@ class zcy_SolverVBD(SolverBase):
             # truncation
             self.zcy_truncation_by_conservative_bound(pos_warp)
 
+            # final frame
+            if time_step == 2999:
+                print('\n--- warning information ---')
+                print('collision_info:\n', self.trimesh_collision_detector.collision_info)
+                print('A.tocsr(), b.numpy():', [np.max(A.tocsr().toarray()), np.min(A.tocsr().toarray()), np.max(b.numpy()), np.min(b.numpy())])
+
+                print('\n --- position information: ---\n')
+                print('dx:', dx)
+                print('particle_conservative_bounds:', self.particle_conservative_bounds)
+                print('pos_warp:', pos_warp)
+                print('vel_warp:', vel_warp)
+
             # compute residual
             residual_norm = self.zcy_compute_residual(pos_warp, pos_prev_warp, vel_warp, dt, mass)
             print('residual_norm:', residual_norm)
@@ -3582,7 +2938,6 @@ class zcy_SolverVBD(SolverBase):
                 print('collision_info:\n', self.trimesh_collision_detector.collision_info)
                 print('A.tocsr(), b.numpy():', [np.max(A.tocsr().toarray()), np.min(A.tocsr().toarray()), np.max(b.numpy()), np.min(b.numpy())])
                 print('residual_norm:', residual_norm)
-                print('self.trimesh_collision_info:', self.trimesh_collision_info)
 
                 print('\n --- position information: ---\n')
                 print('dx:', dx)
@@ -3626,6 +2981,7 @@ class zcy_SolverVBD(SolverBase):
                 self.spring_forces,
                 self.edge_contact_forces,
                 self.vt_contact_forces,
+                self.bending_forces,
                 # fixed particle
                 self.free_particle_offset,
                 # outputs: 
@@ -3642,10 +2998,12 @@ class zcy_SolverVBD(SolverBase):
         edge_contact_hessian_rows, edge_contact_hessian_cols, edge_contact_hessian_values, vt_contact_hessian_rows, vt_contact_hessian_cols, vt_contact_hessian_values = self.zcy_compute_contact_hessian_force(pos_warp)
         # spring hessian
         spring_hessian_rows, spring_hessian_cols, spring_hessian_values = self.zcy_compute_spring_hessian_force(pos_warp)
+        # bending hessian
+        bending_hessian_rows, bending_hessian_cols, bending_hessian_values = self.zcy_compute_bending_hessian_force(pos_warp)
         
-        A_rows = np.concatenate((self.A_rows, spring_hessian_rows.numpy(), edge_contact_hessian_rows.numpy(), vt_contact_hessian_rows.numpy()), axis=0)
-        A_cols = np.concatenate((self.A_cols, spring_hessian_cols.numpy(), edge_contact_hessian_cols.numpy(), vt_contact_hessian_cols.numpy()), axis=0)
-        A_values = np.concatenate((self.A_values, spring_hessian_values.numpy(), edge_contact_hessian_values.numpy(), vt_contact_hessian_values.numpy()), axis=0)
+        A_rows = np.concatenate((self.A_rows, spring_hessian_rows.numpy(), edge_contact_hessian_rows.numpy(), vt_contact_hessian_rows.numpy(), bending_hessian_rows.numpy()), axis=0)
+        A_cols = np.concatenate((self.A_cols, spring_hessian_cols.numpy(), edge_contact_hessian_cols.numpy(), vt_contact_hessian_cols.numpy(), bending_hessian_cols.numpy()), axis=0)
+        A_values = np.concatenate((self.A_values, spring_hessian_values.numpy(), edge_contact_hessian_values.numpy(), vt_contact_hessian_values.numpy(), bending_hessian_values.numpy()), axis=0)
 
         A_rows, A_cols, A_values = warp_coo_deduplicate(wp.array(A_rows, dtype=int), wp.array(A_cols, dtype=int), wp.array(A_values, dtype=wp.mat33))
 
@@ -3828,6 +3186,45 @@ class zcy_SolverVBD(SolverBase):
 
         return spring_hessian_rows, spring_hessian_cols, spring_hessian_values
 
+    def zcy_compute_bending_hessian_force(
+        self, pos_warp,
+    ):
+        # bending
+        self.bending_forces.zero_()
+        self.bending_hessian_values.zero_()
+        self.bending_hessian_rows.zero_()
+        self.bending_hessian_cols.zero_()
+
+        # dim             
+        wp.launch(
+            kernel=zcy_accumulate_bending_force_and_hessian,
+            inputs=[
+                pos_warp,
+                # bending force and hessian
+                self.model.edge_indices,
+                self.model.edge_rest_angle,
+                self.model.edge_rest_length,
+                self.model.edge_bending_properties,
+                # outputs: particle force and hessian
+                self.bending_forces,
+                self.bending_hessian_values,
+                self.bending_hessian_rows,
+                self.bending_hessian_cols
+            ],
+            dim=self.num_spring,
+            device=self.device,
+        )
+        
+        # bending
+        #print('\n---bending---')
+        bending_hessian_rows, bending_hessian_cols, bending_hessian_values = warp_coo_deduplicate(
+            self.bending_hessian_rows, self.bending_hessian_cols, self.bending_hessian_values)
+        #print(f"\nbending_hessian_rows={bending_hessian_rows}, bending_hessian_rows.shape={bending_hessian_rows.shape}")
+        #print(f"\nbending_hessian_cols={bending_hessian_cols}, bending_hessian_cols.shape={bending_hessian_cols.shape}")
+        #print(f"\nbending_hessian_values={bending_hessian_values}, bending_hessian_values.shape={bending_hessian_values.shape}")
+
+        return bending_hessian_rows, bending_hessian_cols, bending_hessian_values
+
 
     def zcy_forward_step_penetration_free(
         self, pos_warp, pos_prev_warp, vel_warp, dt: float
@@ -3856,7 +3253,6 @@ class zcy_SolverVBD(SolverBase):
             device=self.device,
         )
 
-
     def zcy_collision_detection_penetration_free(self, pos_prev_warp):
         self.trimesh_collision_detector.refit(pos_prev_warp)
         self.trimesh_collision_detector.vertex_triangle_collision_detection(self.self_contact_margin)
@@ -3878,7 +3274,8 @@ class zcy_SolverVBD(SolverBase):
             device=self.device,
         )
 
-    
+        # self.zcy_pre_and_refit_contact_size()
+
     def zcy_truncation_by_conservative_bound(self, pos_new):
 
         pos_old = wp.clone(pos_new)
@@ -3896,29 +3293,139 @@ class zcy_SolverVBD(SolverBase):
             dim=self.model.particle_count,
             device=self.device,
         )
+
+    def zcy_pre_and_refit_contact_size(self):
+        # contact num
+        self.num_ee_contact = int(self.trimesh_collision_detector.collision_info.edge_colliding_edges.shape[0]/2)
+        self.num_vt_contact = int(self.trimesh_collision_detector.collision_info.vertex_colliding_triangles.shape[0]/2)
+        print(f"num_ee_contact={self.num_ee_contact}, num_vt_contact={self.num_vt_contact}")
+        self.num_contact = int(max(self.num_ee_contact, self.num_vt_contact))
+        # edge_contact
+        self.edge_contact_forces = wp.zeros(self.num_particle, dtype=wp.vec3, device=self.device)
+        self.edge_contact_hessian_values = wp.zeros(self.num_ee_contact*16, dtype=wp.mat33, device=self.device)
+        self.edge_contact_hessian_rows = wp.zeros(self.num_ee_contact*16, dtype=int, device=self.device)
+        self.edge_contact_hessian_cols = wp.zeros(self.num_ee_contact*16, dtype=int, device=self.device)
+        # vertex-triangle_contact
+        self.vt_contact_forces = wp.zeros(self.num_particle, dtype=wp.vec3, device=self.device)
+        self.vt_contact_hessian_values = wp.zeros(self.num_vt_contact*16, dtype=wp.mat33, device=self.device)
+        self.vt_contact_hessian_rows = wp.zeros(self.num_vt_contact*16, dtype=int, device=self.device)
+        self.vt_contact_hessian_cols = wp.zeros(self.num_vt_contact*16, dtype=int, device=self.device)
 # zcy
 
+    def compute_force_element_adjacency(self, model):
+        adjacency = ForceElementAdjacencyInfo()
+        edges_array = model.edge_indices.to("cpu")
+        spring_array = model.spring_indices.to("cpu")
+        face_indices = model.tri_indices.to("cpu")
 
-    def collision_detection_penetration_free(self, current_state: State, dt: float):
-        self.trimesh_collision_detector.refit(current_state.particle_q)
-        self.trimesh_collision_detector.vertex_triangle_collision_detection(self.self_contact_margin)
-        self.trimesh_collision_detector.edge_edge_collision_detection(self.self_contact_margin)
+        with wp.ScopedDevice("cpu"):
+            if edges_array.size:
+                # build vertex-edge adjacency data
+                num_vertex_adjacent_edges = wp.zeros(shape=(self.model.particle_count,), dtype=wp.int32)
 
-        self.pos_prev_collision_detection.assign(current_state.particle_q)
-        wp.launch(
-            kernel=compute_particle_conservative_bound,
-            inputs=[
-                self.conservative_bound_relaxation,
-                self.self_contact_margin,
-                self.adjacency,
-                self.trimesh_collision_detector.collision_info,
-            ],
-            outputs=[
-                self.particle_conservative_bounds,
-            ],
-            dim=self.model.particle_count,
-            device=self.device,
-        )
+                wp.launch(
+                    kernel=self.count_num_adjacent_edges,
+                    inputs=[edges_array, num_vertex_adjacent_edges],
+                    dim=1,
+                )
+
+                num_vertex_adjacent_edges = num_vertex_adjacent_edges.numpy()
+                vertex_adjacent_edges_offsets = np.empty(shape=(self.model.particle_count + 1,), dtype=wp.int32)
+                vertex_adjacent_edges_offsets[1:] = np.cumsum(2 * num_vertex_adjacent_edges)[:]
+                vertex_adjacent_edges_offsets[0] = 0
+                adjacency.v_adj_edges_offsets = wp.array(vertex_adjacent_edges_offsets, dtype=wp.int32)
+
+                # temporal variables to record how much adjacent edges has been filled to each vertex
+                vertex_adjacent_edges_fill_count = wp.zeros(shape=(self.model.particle_count,), dtype=wp.int32)
+
+                edge_adjacency_array_size = 2 * num_vertex_adjacent_edges.sum()
+                # vertex order: o0: 0, o1: 1, v0: 2, v1: 3,
+                adjacency.v_adj_edges = wp.empty(shape=(edge_adjacency_array_size,), dtype=wp.int32)
+
+                wp.launch(
+                    kernel=self.fill_adjacent_edges,
+                    inputs=[
+                        edges_array,
+                        adjacency.v_adj_edges_offsets,
+                        vertex_adjacent_edges_fill_count,
+                        adjacency.v_adj_edges,
+                    ],
+                    dim=1,
+                )
+            else:
+                adjacency.v_adj_edges_offsets = wp.empty(shape=(0,), dtype=wp.int32)
+                adjacency.v_adj_edges = wp.empty(shape=(0,), dtype=wp.int32)
+
+            if face_indices.size:
+                # compute adjacent triangles
+                # count number of adjacent faces for each vertex
+                num_vertex_adjacent_faces = wp.zeros(shape=(self.model.particle_count,), dtype=wp.int32)
+                wp.launch(kernel=self.count_num_adjacent_faces, inputs=[face_indices, num_vertex_adjacent_faces], dim=1)
+
+                # preallocate memory based on counting results
+                num_vertex_adjacent_faces = num_vertex_adjacent_faces.numpy()
+                vertex_adjacent_faces_offsets = np.empty(shape=(self.model.particle_count + 1,), dtype=wp.int32)
+                vertex_adjacent_faces_offsets[1:] = np.cumsum(2 * num_vertex_adjacent_faces)[:]
+                vertex_adjacent_faces_offsets[0] = 0
+                adjacency.v_adj_faces_offsets = wp.array(vertex_adjacent_faces_offsets, dtype=wp.int32)
+
+                vertex_adjacent_faces_fill_count = wp.zeros(shape=(self.model.particle_count,), dtype=wp.int32)
+
+                face_adjacency_array_size = 2 * num_vertex_adjacent_faces.sum()
+                # (face, vertex_order) * num_adj_faces * num_particles
+                # vertex order: v0: 0, v1: 1, o0: 2, v2: 3
+                adjacency.v_adj_faces = wp.empty(shape=(face_adjacency_array_size,), dtype=wp.int32)
+
+                wp.launch(
+                    kernel=self.fill_adjacent_faces,
+                    inputs=[
+                        face_indices,
+                        adjacency.v_adj_faces_offsets,
+                        vertex_adjacent_faces_fill_count,
+                        adjacency.v_adj_faces,
+                    ],
+                    dim=1,
+                )
+            else:
+                adjacency.v_adj_faces_offsets = wp.empty(shape=(0,), dtype=wp.int32)
+                adjacency.v_adj_faces = wp.empty(shape=(0,), dtype=wp.int32)
+
+            if spring_array.size:
+                # build vertex-springs adjacency data
+                num_vertex_adjacent_spring = wp.zeros(shape=(self.model.particle_count,), dtype=wp.int32)
+
+                wp.launch(
+                    kernel=self.count_num_adjacent_springs,
+                    inputs=[spring_array, num_vertex_adjacent_spring],
+                    dim=1,
+                )
+
+                num_vertex_adjacent_spring = num_vertex_adjacent_spring.numpy()
+                vertex_adjacent_springs_offsets = np.empty(shape=(self.model.particle_count + 1,), dtype=wp.int32)
+                vertex_adjacent_springs_offsets[1:] = np.cumsum(num_vertex_adjacent_spring)[:]
+                vertex_adjacent_springs_offsets[0] = 0
+                adjacency.v_adj_springs_offsets = wp.array(vertex_adjacent_springs_offsets, dtype=wp.int32)
+
+                # temporal variables to record how much adjacent springs has been filled to each vertex
+                vertex_adjacent_springs_fill_count = wp.zeros(shape=(self.model.particle_count,), dtype=wp.int32)
+                adjacency.v_adj_springs = wp.empty(shape=(num_vertex_adjacent_spring.sum(),), dtype=wp.int32)
+
+                wp.launch(
+                    kernel=self.fill_adjacent_springs,
+                    inputs=[
+                        spring_array,
+                        adjacency.v_adj_springs_offsets,
+                        vertex_adjacent_springs_fill_count,
+                        adjacency.v_adj_springs,
+                    ],
+                    dim=1,
+                )
+
+            else:
+                adjacency.v_adj_springs_offsets = wp.empty(shape=(0,), dtype=wp.int32)
+                adjacency.v_adj_springs = wp.empty(shape=(0,), dtype=wp.int32)
+
+        return adjacency
 
     def rebuild_bvh(self, state: State):
         """This function will rebuild the BVHs used for detecting self-contacts using the input `state`.
