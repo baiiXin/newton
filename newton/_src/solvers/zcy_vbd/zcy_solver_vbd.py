@@ -56,8 +56,8 @@ VBD_DEBUG_PRINTING_OPTIONS = {
     # "contact_info",
 }
 
-NUM_THREADS_PER_COLLISION_PRIMITIVE = 4
-TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE = 16
+NUM_THREADS_PER_COLLISION_PRIMITIVE = 64
+TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE = 128
 
 
 class mat32(matrix(shape=(3, 2), dtype=float32)):
@@ -2213,7 +2213,7 @@ def zcy_forward_step_penetration_free(
         return
 
     vel_new = vel[particle_index] + gravity * dt
-    pos_inertia = prev_pos[particle_index] + vel_new * dt
+    pos_inertia = prev_pos[particle_index] + vel_new * dt 
     inertia[particle_index] = pos_inertia
 
     pos[particle_index] = apply_conservative_bound_truncation(
@@ -2265,6 +2265,8 @@ def zcy_VBD_accumulate_contact_force_and_hessian(
     
     # process edge-edge collisions
     if t_id * 2 < collision_info.edge_colliding_edges.shape[0]:
+        #wp.printf("t_id: %d\n", collision_info.edge_colliding_edges.shape[0])
+        #wp.printf("t_id: %d, e1_idx: %d, e2_idx: %d\n", t_id, collision_info.edge_colliding_edges[2 * t_id], collision_info.edge_colliding_edges[2 * t_id + 1])
         e1_idx = collision_info.edge_colliding_edges[2 * t_id]
         e2_idx = collision_info.edge_colliding_edges[2 * t_id + 1]
 
@@ -2296,6 +2298,8 @@ def zcy_VBD_accumulate_contact_force_and_hessian(
 
             #加两遍，除2
             if has_contact:
+                #wp.printf("has_contact: %d, e1_idx: %d, e2_idx: %d, e1_v1: %d, e1_v2: %d, e2_v1: %d, e2_v2: %d\n", 
+                #          has_contact, e1_idx, e2_idx, e1_v1, e1_v2, e2_v1, e2_v2)
                 # edge1
                 # force
                 wp.atomic_add(edge_contact_forces, e1_v1, collision_force_10*0.5 )
@@ -2383,6 +2387,8 @@ def zcy_VBD_accumulate_contact_force_and_hessian(
 
     # process vertex-triangle collisions
     if t_id * 2 < collision_info.vertex_colliding_triangles.shape[0]:
+        #wp.printf("t_id: %d\n", collision_info.vertex_colliding_triangles.shape[0])
+        #wp.printf("t_id: %d, v_idx: %d, t_idx: %d\n", t_id, collision_info.vertex_colliding_triangles[2 * t_id], collision_info.vertex_colliding_triangles[2 * t_id + 1])
         particle_idx = collision_info.vertex_colliding_triangles[2 * t_id]
         tri_idx = collision_info.vertex_colliding_triangles[2 * t_id + 1]
 
@@ -2424,6 +2430,9 @@ def zcy_VBD_accumulate_contact_force_and_hessian(
                 friction_epsilon,
             )
             if has_contact:
+                #wp.printf("has_contact: %d, p_idx: %d, t_idx: %d, t_a: %d, t_b: %d, t_c: %d\n", 
+                #          has_contact, particle_idx, tri_idx, tri_a, tri_b, tri_c)
+
                 contact_index = t_id
                 contact_base = contact_index * 16  # 每个 particle-tri contact 占16个条目
 
@@ -3284,7 +3293,7 @@ class zcy_SolverVBD(SolverBase):
         self_contact_radius: float = 0.08,
         self_contact_margin: float = 0.08,
         integrate_with_external_rigid_solver: bool = False,
-        penetration_free_conservative_bound_relaxation: float = 0.4,
+        penetration_free_conservative_bound_relaxation: float = 0.42,
         friction_epsilon: float = 1e-2,
         vertex_collision_buffer_pre_alloc: int = 32,
         edge_collision_buffer_pre_alloc: int = 64,
@@ -3365,7 +3374,10 @@ class zcy_SolverVBD(SolverBase):
         self.spring = 0
         self.num_spring = self.spring_rest_length.shape[0]
         self.num_triangles = self.model.tri_indices.shape[0]
+        # contact num
         self.num_contact = self.collision_evaluation_kernel_launch_size
+        self.num_ee_contact = self.model.edge_count * NUM_THREADS_PER_COLLISION_PRIMITIVE
+        self.num_vt_contact = self.model.particle_count * NUM_THREADS_PER_COLLISION_PRIMITIVE
 
         # spaces for particle force and hessian
         self.particle_forces = wp.zeros(self.free_particle_num, dtype=wp.vec3, device=self.device)
@@ -3387,14 +3399,14 @@ class zcy_SolverVBD(SolverBase):
 
         # edge_contact
         self.edge_contact_forces = wp.zeros(self.num_particle, dtype=wp.vec3, device=self.device)
-        self.edge_contact_hessian_values = wp.zeros(self.num_contact*16, dtype=wp.mat33, device=self.device)
-        self.edge_contact_hessian_rows = wp.zeros(self.num_contact*16, dtype=int, device=self.device)
-        self.edge_contact_hessian_cols = wp.zeros(self.num_contact*16, dtype=int, device=self.device)
+        self.edge_contact_hessian_values = wp.zeros(self.num_ee_contact*16, dtype=wp.mat33, device=self.device)
+        self.edge_contact_hessian_rows = wp.zeros(self.num_ee_contact*16, dtype=int, device=self.device)
+        self.edge_contact_hessian_cols = wp.zeros(self.num_ee_contact*16, dtype=int, device=self.device)
         # vertex-triangle_contact
         self.vt_contact_forces = wp.zeros(self.num_particle, dtype=wp.vec3, device=self.device)
-        self.vt_contact_hessian_values = wp.zeros(self.num_contact*16, dtype=wp.mat33, device=self.device)
-        self.vt_contact_hessian_rows = wp.zeros(self.num_contact*16, dtype=int, device=self.device)
-        self.vt_contact_hessian_cols = wp.zeros(self.num_contact*16, dtype=int, device=self.device)
+        self.vt_contact_hessian_values = wp.zeros(self.num_vt_contact*16, dtype=wp.mat33, device=self.device)
+        self.vt_contact_hessian_rows = wp.zeros(self.num_vt_contact*16, dtype=int, device=self.device)
+        self.vt_contact_hessian_cols = wp.zeros(self.num_vt_contact*16, dtype=int, device=self.device)
 
         # static matrix
         self.zcy_compute_static_matrix(dt, mass)
@@ -3518,7 +3530,7 @@ class zcy_SolverVBD(SolverBase):
 
 # zcy
     def zcy_simulate_one_step(
-        self,  pos_warp, pos_prev_warp, vel_warp, dt: float, mass: float, damping: float, num_iter: int, tolerance: float
+        self,  pos_warp, pos_prev_warp, vel_warp, dt: float, mass: float, damping: float, num_iter: int, tolerance: float, time_step: int
     ):
         # collision detection before initialization to compute conservative bounds for initialization
         self.zcy_collision_detection_penetration_free(pos_prev_warp)
@@ -3566,7 +3578,28 @@ class zcy_SolverVBD(SolverBase):
             if residual_norm < tolerance:
                 break
             if _iter == num_iter - 1:
-                raise RuntimeError("\n--- warning: reach max iter ---\n")
+                print('\n--- warning information ---')
+                print('collision_info:\n', self.trimesh_collision_detector.collision_info)
+                print('A.tocsr(), b.numpy():', [np.max(A.tocsr().toarray()), np.min(A.tocsr().toarray()), np.max(b.numpy()), np.min(b.numpy())])
+                print('residual_norm:', residual_norm)
+                print('self.trimesh_collision_info:', self.trimesh_collision_info)
+
+                print('\n --- position information: ---\n')
+                print('dx:', dx)
+                print('particle_conservative_bounds:', self.particle_conservative_bounds)
+                print('pos_warp:', pos_warp)
+                print('vel_warp:', vel_warp)
+                print('f:', b.numpy())
+
+                print('\n --- collision information: ---\n')
+                print('self_contact_radius:', self.self_contact_radius)
+                print('soft_contact_ke:', self.model.soft_contact_ke)
+                print('soft_contact_kd:', self.model.soft_contact_kd)
+                print('soft_contact_mu:', self.model.soft_contact_mu)
+                print('friction_epsilon:', self.friction_epsilon)
+                print('edge_edge_parallel_epsilon:', self.trimesh_collision_detector.edge_edge_parallel_epsilon)
+
+                raise RuntimeError(f"\n--- warning: {time_step} time steps reach max iter {_iter} ---\n")
 
         wp.launch(
             kernel=zcy_update_velocity,
@@ -3718,23 +3751,22 @@ class zcy_SolverVBD(SolverBase):
         )
 
         # edge
-        #print('\n---edge---')
-        #print(f"\nedge_contact_hessian_rows={self.edge_contact_hessian_rows}, edge_contact_hessian_rows.shape={self.edge_contact_hessian_rows.shape}")
-        #print(f"\nedge_contact_hessian_cols={self.edge_contact_hessian_cols}, edge_contact_hessian_cols.shape={self.edge_contact_hessian_cols.shape}")
         edge_contact_hessian_rows, edge_contact_hessian_cols, edge_contact_hessian_values = warp_coo_deduplicate(
             self.edge_contact_hessian_rows, self.edge_contact_hessian_cols, self.edge_contact_hessian_values)
+        #print('\n---edge---')
+        #print(f"\nedge_contact_hessian_rows={edge_contact_hessian_rows}, edge_contact_hessian_rows.shape={edge_contact_hessian_rows.shape}")
+        #print(f"\nedge_contact_hessian_cols={edge_contact_hessian_cols}, edge_contact_hessian_cols.shape={edge_contact_hessian_cols.shape}")
+        #print(f"\nedge_contact_hessian_values={edge_contact_hessian_values}, edge_contact_hessian_values.shape={edge_contact_hessian_values.shape}")
         
         # vt
-        #print('\n---vt---')
-        #print(f"\nvt_contact_hessian_rows={self.vt_contact_hessian_rows}, vt_contact_hessian_rows.shape={self.vt_contact_hessian_rows.shape}")
-        #print(f"\nvt_contact_hessian_cols={self.vt_contact_hessian_cols}, vt_contact_hessian_cols.shape={self.vt_contact_hessian_cols.shape}")
         #np.savetxt("debug_rows.txt", self.vt_contact_hessian_rows, fmt="%d")
         #np.savetxt("debug_cols.txt", self.vt_contact_hessian_cols, fmt="%d")
         vt_contact_hessian_rows, vt_contact_hessian_cols, vt_contact_hessian_values = warp_coo_deduplicate(
             self.vt_contact_hessian_rows, self.vt_contact_hessian_cols, self.vt_contact_hessian_values)
+        #print('\n---vt---')
         #print(f"\nvt_contact_hessian_rows={vt_contact_hessian_rows}, vt_contact_hessian_rows.shape={vt_contact_hessian_rows.shape}")
         #print(f"\nvt_contact_hessian_cols={vt_contact_hessian_cols}, vt_contact_hessian_cols.shape={vt_contact_hessian_cols.shape}")
-
+        #print(f"\nvt_contact_hessian_values={vt_contact_hessian_values}, vt_contact_hessian_values.shape={vt_contact_hessian_values.shape}")
 
         return edge_contact_hessian_rows, edge_contact_hessian_cols, edge_contact_hessian_values, vt_contact_hessian_rows, vt_contact_hessian_cols, vt_contact_hessian_values
 
