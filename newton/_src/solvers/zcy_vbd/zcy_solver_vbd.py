@@ -2931,9 +2931,8 @@ class zcy_SolverVBD(SolverBase):
             # compute residual
             residual_norm = self.zcy_compute_residual(pos_warp, pos_prev_warp, vel_warp, dt, mass)
             print('residual_norm:', residual_norm)
-            if residual_norm < tolerance:
-                break
-            if _iter == num_iter - 1:
+
+            if _iter > 10 and residual_norm > 1e1 :
                 print('\n--- warning information ---')
                 print('collision_info:\n', self.trimesh_collision_detector.collision_info)
                 print('A.tocsr(), b.numpy():', [np.max(A.tocsr().toarray()), np.min(A.tocsr().toarray()), np.max(b.numpy()), np.min(b.numpy())])
@@ -2956,6 +2955,9 @@ class zcy_SolverVBD(SolverBase):
 
                 raise RuntimeError(f"\n--- warning: {time_step} time steps reach max iter {_iter} ---\n")
 
+            if residual_norm < tolerance or _iter > 50:
+                break
+
         wp.launch(
             kernel=zcy_update_velocity,
             inputs=[dt, damping, pos_prev_warp, pos_warp, vel_warp, self.all_particle_flag],
@@ -2967,7 +2969,7 @@ class zcy_SolverVBD(SolverBase):
         
         # inertia and gravity
         b = wp.zeros(shape=(self.free_particle_num,), dtype=wp.vec3)
-        gravity = wp.vec3(0.0, 0.0, -9.81)
+
         wp.launch(
             kernel=zcy_assemble_inertia_and_gravity_add_force,
             inputs=[
@@ -2976,7 +2978,7 @@ class zcy_SolverVBD(SolverBase):
                 vel_warp,
                 dt,
                 mass,
-                gravity,
+                self.model.gravity,
                 # force
                 self.spring_forces,
                 self.edge_contact_forces,
@@ -3028,7 +3030,7 @@ class zcy_SolverVBD(SolverBase):
         
         # inertia and gravity
         residual = wp.zeros(shape=(self.free_particle_num,), dtype=wp.vec3)
-        gravity = wp.vec3(0.0, 0.0, -9.81)
+
         wp.launch(
             kernel=zcy_residual_computation,
             inputs=[
@@ -3037,7 +3039,7 @@ class zcy_SolverVBD(SolverBase):
                 vel_warp,
                 dt,
                 mass,
-                gravity,
+                self.model.gravity,
                 # force
                 self.spring_forces,
                 self.edge_contact_forces,
@@ -3232,7 +3234,6 @@ class zcy_SolverVBD(SolverBase):
         model=self.model
 
         # give the gravity to the model
-        model.gravity = wp.vec3(0.0, 0.0, -9.81)
         print(model.gravity)    
 
         # pos_prev_warp give information to update pos_warp
