@@ -1713,8 +1713,9 @@ def apply_conservative_bound_truncation(
         accumulated_displacement = accumulated_displacement * (
             accumulated_displacement_norm_truncated / accumulated_displacement_norm
         )
-
         return particle_pos_prev_collision_detection + accumulated_displacement
+    #elif conservative_bound < 1e-6:
+    #    return particle_pos_prev_collision_detection
     else:
         return pos_new
 
@@ -2392,8 +2393,12 @@ def zcy_residual_computation(
 
 @wp.kernel
 def zcy_update_velocity(
-    dt: float, damping: float, pos_prev: wp.array(dtype=wp.vec3), pos: wp.array(dtype=wp.vec3), 
-    vel: wp.array(dtype=wp.vec3), all_particle_flag: wp.array(dtype=wp.int32)
+    dt: float, 
+    damping: float, 
+    pos_prev: wp.array(dtype=wp.vec3), 
+    pos: wp.array(dtype=wp.vec3), 
+    vel: wp.array(dtype=wp.vec3), 
+    all_particle_flag: wp.array(dtype=wp.int32)
 ):
     particle = wp.tid()
 
@@ -2404,7 +2409,11 @@ def zcy_update_velocity(
 
 @wp.kernel
 def zcy_update_position(
-    pos: wp.array(dtype=wp.vec3), dx: wp.array(dtype=wp.vec3), all_particle_flag: wp.array(dtype=wp.int32)
+    pos: wp.array(dtype=wp.vec3), 
+    dx: wp.array(dtype=wp.vec3), 
+    all_particle_flag: wp.array(dtype=wp.int32),
+    pos_prev_collision_detection: wp.array(dtype=wp.vec3),
+    particle_conservative_bounds: wp.array(dtype=float),
 ):
     particle_index = wp.tid()
 
@@ -2412,8 +2421,11 @@ def zcy_update_position(
         return
 
     offset = all_particle_flag[particle_index]
-    pos[particle_index] += dx[particle_index-offset]
+    pos_before_truncation = pos[particle_index] + dx[particle_index-offset]
 
+    pos[particle_index] = apply_conservative_bound_truncation(
+        particle_index, pos_before_truncation, pos_prev_collision_detection, particle_conservative_bounds
+    )
 
 
 def warp_coo_deduplicate(rows, cols, vals):
@@ -2905,16 +2917,21 @@ class zcy_SolverVBD(SolverBase):
             dx = spsolve(A.tocsr(), b.numpy().reshape(self.free_particle_num*3))
             dx = wp.array(dx.reshape(self.free_particle_num,3), dtype=wp.vec3)
 
-            # update position
+            # update position and truncation
             wp.launch(
                 kernel=zcy_update_position,
-                inputs=[pos_warp, dx, self.all_particle_flag],
+                inputs=[pos_warp, 
+                        dx, 
+                        self.all_particle_flag, 
+                        self.pos_prev_collision_detection, 
+                        self.particle_conservative_bounds,
+                        ],
                 dim=self.num_particle,
                 device=self.device,
             )
 
             # truncation
-            self.zcy_truncation_by_conservative_bound(pos_warp)
+            # self.zcy_truncation_by_conservative_bound(pos_warp)
 
             # final frame
             if time_step == 2999:
@@ -2955,13 +2972,19 @@ class zcy_SolverVBD(SolverBase):
 
                 raise RuntimeError(f"\n--- warning: {time_step} time steps reach max iter {_iter} ---\n")
 
-            if residual_norm < tolerance or _iter > 50:
+            if residual_norm < tolerance or _iter > 100 :
+                break
+            if residual_norm < 1e-4 and _iter > 5:
+                break
+            if residual_norm < 1e-3 and _iter > 10:
+                break
+            if residual_norm < 1e-2 and _iter > 15:
                 break
 
         wp.launch(
             kernel=zcy_update_velocity,
             inputs=[dt, damping, pos_prev_warp, pos_warp, vel_warp, self.all_particle_flag],
-            dim=self.model.particle_count,
+            dim=self.num_particle,
             device=self.device,
         )
 
