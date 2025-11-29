@@ -509,7 +509,7 @@ def evaluate_self_contact_force_norm(dis: float, collision_radius: float, k: flo
 
     # C2 continuity calculation
     tau = collision_radius * 0.5
-    if tau > dis > 1e-5:
+    if tau > dis > 0.0:
         k2 = 0.5 * tau * tau * k
         dEdD = -k2 / dis
         d2E_dDdD = k2 / (dis * dis)
@@ -1708,11 +1708,35 @@ def apply_conservative_bound_truncation(
     conservative_bound = particle_conservative_bounds[v_index]
 
     accumulated_displacement_norm = wp.length(accumulated_displacement)
-    if accumulated_displacement_norm > conservative_bound:
+    if accumulated_displacement_norm >= conservative_bound:
         accumulated_displacement_norm_truncated = conservative_bound
         accumulated_displacement = accumulated_displacement * (
             accumulated_displacement_norm_truncated / accumulated_displacement_norm
         )
+        if 0:#v_index == 3:
+            dx_truncated =wp.length(accumulated_displacement * (
+                accumulated_displacement_norm_truncated / accumulated_displacement_norm
+            ))
+            wp.printf(
+                "\nVertex %d:\n dx %.10e; bound %.10e; ratio(b/dx) %.10e;\n dx_truncated %.10e\n",
+                v_index,
+                accumulated_displacement_norm,
+                conservative_bound,
+                accumulated_displacement_norm_truncated / accumulated_displacement_norm,
+                dx_truncated,
+            )
+            wp.printf(
+                "pos_old+dis=pos_new: \n pos_old [%.10e,%.10e,%.10e];\n dis_pls [%.10e,%.10e,%.10e];\n pos_new [%.10e,%.10e,%.10e];\n",
+                particle_pos_prev_collision_detection[0],
+                particle_pos_prev_collision_detection[1],
+                particle_pos_prev_collision_detection[2],
+                accumulated_displacement[0],
+                accumulated_displacement[1],
+                accumulated_displacement[2],
+                particle_pos_prev_collision_detection[0] + accumulated_displacement[0],
+                particle_pos_prev_collision_detection[1] + accumulated_displacement[1],
+                particle_pos_prev_collision_detection[2] + accumulated_displacement[2],
+            )
         return particle_pos_prev_collision_detection + accumulated_displacement
     #elif conservative_bound < 1e-6:
     #    return particle_pos_prev_collision_detection
@@ -2406,6 +2430,7 @@ def zcy_update_velocity(
         return
 
     vel[particle] = damping * (pos[particle] - pos_prev[particle]) / dt
+    #wp.printf("Thread %d: vel[particle] = %.12f * (%.12f - %.12f) / %.12f = %.12f\n", particle, damping, pos[particle][2], pos_prev[particle][2], dt, vel[particle][2])
 
 @wp.kernel
 def zcy_update_position(
@@ -2896,7 +2921,7 @@ class zcy_SolverVBD(SolverBase):
 
         # after initialization, we need new collision detection to update the bounds
         # collision detection
-        self.zcy_collision_detection_penetration_free(pos_warp)
+        # self.zcy_collision_detection_penetration_free(pos_warp)
 
         for _iter in range(num_iter):
             # collision detection
@@ -2933,8 +2958,13 @@ class zcy_SolverVBD(SolverBase):
             # truncation
             # self.zcy_truncation_by_conservative_bound(pos_warp)
 
+            # compute residual
+            residual_norm = self.zcy_compute_residual(pos_warp, pos_prev_warp, vel_warp, dt, mass)
+            print('residual_norm:', residual_norm)
+
             # final frame
-            if time_step == 2999:
+            '''
+            if time_step == 216:
                 print('\n--- warning information ---')
                 print('collision_info:\n', self.trimesh_collision_detector.collision_info)
                 print('A.tocsr(), b.numpy():', [np.max(A.tocsr().toarray()), np.min(A.tocsr().toarray()), np.max(b.numpy()), np.min(b.numpy())])
@@ -2944,12 +2974,74 @@ class zcy_SolverVBD(SolverBase):
                 print('particle_conservative_bounds:', self.particle_conservative_bounds)
                 print('pos_warp:', pos_warp)
                 print('vel_warp:', vel_warp)
+            '''
+            if time_step == 47 or time_step == 48:
+                log_path = "debug_unit_stiff_contact4.txt"
 
-            # compute residual
-            residual_norm = self.zcy_compute_residual(pos_warp, pos_prev_warp, vel_warp, dt, mass)
-            print('residual_norm:', residual_norm)
+                with open(log_path, "a", encoding="utf-8") as f:
+                    # 写入当前迭代信息
+                    f.write(f'\n\n\n--- warning information --- time_step: {time_step} ---\n')
+                    f.write(f'--- i_iter: {_iter} ---\n')
+                    f.write(f'residual_norm: {residual_norm}\n')
+                    f.write('collision_info:\n')
+                    f.write(str(self.trimesh_collision_detector.collision_info) + "\n\n")
 
-            if _iter > 10 and residual_norm > 1e1 :
+                    # 线性方程组信息
+                    f.write('A.tocsr(), b.numpy():\n')
+                    f.write(str([
+                        np.max(A.tocsr().toarray()),
+                        np.min(A.tocsr().toarray()),
+                        np.max(b.numpy()),
+                        np.min(b.numpy())
+                    ]) + "\n\n")
+
+                    # 优化信息
+                    A_dense = A.tocsr().toarray()
+                    A_sym = (A_dense + A_dense.T) * 0.5
+                    try:
+                        cond = float(np.linalg.cond(A_dense))
+                    except Exception:
+                        cond = float("inf")
+                    is_symmetric = bool(np.allclose(A_dense, A_dense.T, atol=1e-8))
+                    is_spd = False
+                    eig_min = float("nan")
+                    eig_max = float("nan")
+                    try:
+                        eigvals = np.linalg.eigvalsh(A_sym)
+                        eig_min = float(eigvals.min())
+                        eig_max = float(eigvals.max())
+                        is_spd = bool(eig_min > 0.0 and is_symmetric)
+                    except Exception:
+                        try:
+                            np.linalg.cholesky(A_sym)
+                            is_spd = bool(is_symmetric)
+                        except Exception:
+                            is_spd = False
+                    f.write('A.condition_number_and_spd:\n')
+                    f.write('[cond, is_symmetric, is_spd, eig_min, eig_max]\n')
+                    f.write(str([cond, is_symmetric, is_spd, eig_min, eig_max]) + "\n\n")
+
+                    # 位置信息
+                    f.write('--- position information ---\n')
+                    f.write('particle_conservative_bounds:\n')
+                    f.write(str(self.particle_conservative_bounds) + "\n\n")
+
+                    f.write('dx:\n')
+                    f.write(str(dx) + "\n\n")
+
+                    f.write('pos_prev_collision_detection:\n')
+                    f.write(str(self.pos_prev_collision_detection) + "\n\n")
+
+                    f.write('pos_warp:\n')
+                    f.write(str(pos_warp) + "\n\n")
+
+                    f.write('pos_')
+
+                    f.write('vel_warp:\n')
+                    f.write(str(vel_warp) + "\n\n")
+                #print(f"\nDebug info written to {log_path}\n")
+
+            if _iter == num_iter - 1:
                 print('\n--- warning information ---')
                 print('collision_info:\n', self.trimesh_collision_detector.collision_info)
                 print('A.tocsr(), b.numpy():', [np.max(A.tocsr().toarray()), np.min(A.tocsr().toarray()), np.max(b.numpy()), np.min(b.numpy())])
@@ -2972,14 +3064,19 @@ class zcy_SolverVBD(SolverBase):
 
                 raise RuntimeError(f"\n--- warning: {time_step} time steps reach max iter {_iter} ---\n")
 
-            if residual_norm < tolerance or _iter > 100 :
+            
+            if residual_norm < tolerance :
                 break
             if residual_norm < 1e-4 and _iter > 5:
+                break
+            '''
+            if residual_norm < 1e-2 and _iter > 15:
                 break
             if residual_norm < 1e-3 and _iter > 10:
                 break
             if residual_norm < 1e-2 and _iter > 15:
                 break
+            '''
 
         wp.launch(
             kernel=zcy_update_velocity,
@@ -3277,12 +3374,12 @@ class zcy_SolverVBD(SolverBase):
             device=self.device,
         )
 
-    def zcy_collision_detection_penetration_free(self, pos_prev_warp):
-        self.trimesh_collision_detector.refit(pos_prev_warp)
+    def zcy_collision_detection_penetration_free(self, pos_warp):
+        self.trimesh_collision_detector.refit(pos_warp)
         self.trimesh_collision_detector.vertex_triangle_collision_detection(self.self_contact_margin)
         self.trimesh_collision_detector.edge_edge_collision_detection(self.self_contact_margin)
 
-        self.pos_prev_collision_detection.assign(pos_prev_warp)
+        self.pos_prev_collision_detection.assign(pos_warp)
         wp.launch(
             kernel=compute_particle_conservative_bound,
             inputs=[
