@@ -3364,9 +3364,10 @@ class zcy_SolverVBD(SolverBase):
                     raise RuntimeError(f"\n--- warning: {time_step} line search reach max iter {_line_search_times} or incremental_energy > 0.0 {incremental_energy.numpy()[0]} ---\n")
                 
                 if abs(incremental_energy.numpy().item()) < energy0.numpy().item() * 1e-16:
+                    print('到达数值精度')
                     break
 
-                if energy1.numpy().item() < energy0.numpy().item() + incremental_energy.numpy().item():
+                if energy1.numpy().item() < energy0.numpy().item() + incremental_energy.numpy().item() and residual_norm1 < residual_norm0:
                     break
                 else:
                     alpha *= gamma
