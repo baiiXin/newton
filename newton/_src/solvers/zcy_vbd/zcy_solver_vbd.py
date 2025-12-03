@@ -3245,14 +3245,16 @@ class zcy_SolverVBD(SolverBase):
         # collision detection
         self.zcy_collision_detection_penetration_free(pos_warp)
 
+        # residual_start
         _, residual_norm_forward = self.zcy_compute_residual(pos_warp, pos_prev_warp, vel_warp, dt, mass)
         energy_forward = self.zcy_compute_energy(pos_warp, pos_prev_warp, vel_warp, dt, mass)
         print('residual_norm_forward:', residual_norm_forward, 'energy_forward:', energy_forward)
         
+        last_residual_norm = residual_norm_forward
         for _iter in range(num_iter):
             # break
-            if residual_norm_forward < 1e-5:
-                break
+            #if last_residual_norm < 1e-5:
+            #    break
 
             # collision detection
             self.zcy_collision_detection_penetration_free(pos_warp)
@@ -3321,7 +3323,7 @@ class zcy_SolverVBD(SolverBase):
                 print('incremental_energy:', incremental_energy)
                 '''
                 # line search warning
-                if _line_search_times == 50 or incremental_energy.numpy()[0] > 0.0 : #
+                if _line_search_times == 50 or incremental_energy.numpy().item() > 0.0 : #
                     # 优化信息
                     A_dense = A.tocsr().toarray()
                     A_sym = (A_dense + A_dense.T) * 0.5
@@ -3349,12 +3351,22 @@ class zcy_SolverVBD(SolverBase):
                     print(str([cond, is_symmetric, is_spd, eig_min, eig_max]) + "\n\n")
 
                     print('x', pos_warp)
+                    try:
+                        import os
+                        save_dir = r"c:\data\sim\simulation-beginning\cloth_simulation_newton\run\render\input"
+                        os.makedirs(save_dir, exist_ok=True)
+                        save_path = os.path.join(save_dir, f"cloth_data_error_dump_{time_step}.npy")
+                        pos_np = pos_warp.numpy() if hasattr(pos_warp, "numpy") else pos_warp
+                        np.save(save_path, [pos_np])
+                        print(f"Saved debug frame to {save_path}")
+                    except Exception as e:
+                        print(f"Failed to save debug frame: {e}")
                     raise RuntimeError(f"\n--- warning: {time_step} line search reach max iter {_line_search_times} or incremental_energy > 0.0 {incremental_energy.numpy()[0]} ---\n")
                 
-                if abs(incremental_energy.numpy()[0]) < energy0 * 1e-16:
+                if abs(incremental_energy.numpy().item()) < energy0.numpy().item() * 1e-16:
                     break
 
-                if energy1.numpy()[0] < energy0.numpy()[0] + incremental_energy.numpy()[0]:
+                if energy1.numpy().item() < energy0.numpy().item() + incremental_energy.numpy().item():
                     break
                 else:
                     alpha *= gamma
@@ -3368,7 +3380,7 @@ class zcy_SolverVBD(SolverBase):
             #print('residual', np.max(residual.numpy()), np.min(residual.numpy()))
             #print('dx:', np.max(dx.numpy()), np.min(dx.numpy()))
             
-            if residual_norm < tolerance or residual_norm/residual_norm_forward < 1e-3 or energy0.numpy()[0]-energy1.numpy()[0] < energy0 * 1e-6:
+            if residual_norm < tolerance or residual_norm/residual_norm_forward < 1e-4 or energy0.numpy().item()-energy1.numpy().item() < energy0.numpy().item() * 1e-6:
                 break
 
             # region: iteration information 
@@ -3450,7 +3462,7 @@ class zcy_SolverVBD(SolverBase):
                     f.write(str(vel_warp) + "\n\n")
                 #print(f"\nDebug info written to {log_path}\n")
             '''
-            if _iter == num_iter - 1:
+            if _iter == num_iter - 1 or residual_norm > 10.0*residual_norm_forward or energy.numpy().item() > energy0.numpy().item():
                 print('\n--- warning information ---')
                 print('collision_info:\n', self.trimesh_collision_detector.collision_info)
                 print('A.tocsr(), b.numpy():', [np.max(A.tocsr().toarray()), np.min(A.tocsr().toarray()), np.max(b.numpy()), np.min(b.numpy())])
@@ -3470,6 +3482,47 @@ class zcy_SolverVBD(SolverBase):
                 print('soft_contact_mu:', self.model.soft_contact_mu)
                 print('friction_epsilon:', self.friction_epsilon)
                 print('edge_edge_parallel_epsilon:', self.trimesh_collision_detector.edge_edge_parallel_epsilon)
+
+                # 优化信息
+                A_dense = A.tocsr().toarray()
+                A_sym = (A_dense + A_dense.T) * 0.5
+                try:
+                    cond = float(np.linalg.cond(A_dense))
+                except Exception:
+                    cond = float("inf")
+                is_symmetric = bool(np.allclose(A_dense, A_dense.T, atol=1e-8))
+                is_spd = False
+                eig_min = float("nan")
+                eig_max = float("nan")
+                try:
+                    eigvals = np.linalg.eigvalsh(A_sym)
+                    eig_min = float(eigvals.min())
+                    eig_max = float(eigvals.max())
+                    is_spd = bool(eig_min > 0.0 and is_symmetric)
+                except Exception:
+                    try:
+                        np.linalg.cholesky(A_sym)
+                        is_spd = bool(is_symmetric)
+                    except Exception:
+                        is_spd = False
+                print('A.condition_number_and_spd:\n')
+                print('[cond, is_symmetric, is_spd, eig_min, eig_max]\n')
+                print(str([cond, is_symmetric, is_spd, eig_min, eig_max]) + "\n\n")
+
+                try:
+                    import os
+                    save_dir = r"c:\data\sim\simulation-beginning\cloth_simulation_newton\run\render\input"
+                    os.makedirs(save_dir, exist_ok=True)
+                    save_path = os.path.join(save_dir, f"cloth_data_error_dump_{time_step}.npy")
+                    pos_np = pos_warp.numpy() if hasattr(pos_warp, "numpy") else pos_warp
+                    np.save(save_path, [pos_np])
+                    print(f"Saved debug frame to {save_path}")
+                except Exception as e:
+                    print(f"Failed to save debug frame: {e}")
+
+                print(f"\n_iter == num_iter - 1: {_iter == num_iter - 1}")
+                print(f"residual_norm > 10.0*residual_norm_forward: {residual_norm > 10.0*residual_norm_forward} ")
+                print(f"energy.numpy().item() > energy0.numpy().item(): {energy.numpy().item() > energy0.numpy().item()}")
 
                 raise RuntimeError(f"\n--- warning: {time_step} time steps reach max iter {_iter} ---\n")
 
@@ -3556,6 +3609,8 @@ class zcy_SolverVBD(SolverBase):
         return A
 
     def zcy_compute_residual(self, pos_warp, pos_prev_warp, vel_warp, dt, mass):
+        # refit
+        _ = self.zcy_assemble_matrix(pos_warp)
         
         # inertia and gravity
         residual = wp.zeros(shape=(self.free_particle_num,), dtype=wp.vec3)
