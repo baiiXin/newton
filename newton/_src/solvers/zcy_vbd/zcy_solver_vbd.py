@@ -30,6 +30,7 @@ from warp.sparse import bsr_mm, bsr_mv, bsr_axpy, bsr_scale
 import numpy as np
 from scipy.sparse import bsr_matrix
 from pypardiso import spsolve
+#from scipy.sparse.linalg import spsolve
 
 
 from ...core.types import override
@@ -949,7 +950,7 @@ def zcy_evaluate_dihedral_angle_based_bending_force_hessian(
     h33 = k * wp.outer(g3, g3)
 
     return f0, f1, f2, f3, h00, h01, h02, h03, h10, h11, h12, h13, h20, h21, h22, h23, h30, h31, h32, h33
-    
+
 @wp.func
 def zcy_evaluate_stvk_force_hessian(
     face: int,
@@ -1301,6 +1302,26 @@ def zcy_evaluate_spring_force_and_hessian(
 
     return f, H
 
+@wp.func
+def zcy_apply_conservative_bound_truncation(
+    v_index: wp.int32,
+    pos_new: wp.vec3,
+    pos_prev_collision_detection: wp.array(dtype=wp.vec3),
+    particle_conservative_bounds: wp.array(dtype=float),
+):
+    particle_pos_prev_collision_detection = pos_prev_collision_detection[v_index]
+    accumulated_displacement = pos_new - particle_pos_prev_collision_detection
+    conservative_bound = particle_conservative_bounds[v_index]
+
+    accumulated_displacement_norm = wp.length(accumulated_displacement)
+    if accumulated_displacement_norm >= conservative_bound:
+        accumulated_displacement_norm_truncated = conservative_bound
+        accumulated_displacement = accumulated_displacement * (
+            accumulated_displacement_norm_truncated / accumulated_displacement_norm
+        )
+        return particle_pos_prev_collision_detection + accumulated_displacement, accumulated_displacement
+    else:
+        return pos_new, accumulated_displacement
 # zcy
 
 
@@ -1983,6 +2004,7 @@ def accumulate_contact_force_and_hessian(
 @wp.kernel
 def zcy_forward_step_penetration_free(
     dt: float,
+    forward_type: int,
     gravity: wp.vec3,
     prev_pos: wp.array(dtype=wp.vec3),
     pos: wp.array(dtype=wp.vec3),
@@ -1997,8 +2019,13 @@ def zcy_forward_step_penetration_free(
     if all_particle_flag[particle_index] == -1:
         return
 
+    if forward_type == 0:
+        para = 0.0
+    else:
+        para = 1.0
+
     vel_new = vel[particle_index] + gravity * dt
-    pos_inertia = prev_pos[particle_index] + vel_new * dt 
+    pos_inertia = prev_pos[particle_index] + para * vel_new * dt 
     inertia[particle_index] = pos_inertia
 
     pos[particle_index] = apply_conservative_bound_truncation(
@@ -2399,6 +2426,7 @@ def zcy_residual_computation(
     spring_forces: wp.array(dtype=wp.vec3),
     edge_contact_forces: wp.array(dtype=wp.vec3),
     vt_contact_forces: wp.array(dtype=wp.vec3),
+    bending_forces: wp.array(dtype=wp.vec3),
     # fixed particle
     free_particle_offset: wp.array(dtype=wp.int32),
     # outputs: 
@@ -2412,8 +2440,298 @@ def zcy_residual_computation(
     # inertia
     inertia = pos_warp[free_particle] - pos_prev_warp[free_particle] - dt * vel_warp[free_particle]
 
-    residual[tid] = inertia - 1.0/mass *dt*dt * (spring_forces[free_particle] + edge_contact_forces[free_particle] + vt_contact_forces[free_particle] + gravity)
+    residual[tid] = inertia - 1.0/mass *dt*dt * (spring_forces[free_particle] + edge_contact_forces[free_particle] + vt_contact_forces[free_particle] + bending_forces[free_particle] + gravity)
 
+
+@wp.kernel
+def zcy_compute_incremental_energy(
+    residual: wp.array(dtype=wp.vec3),
+    dx: wp.array(dtype=wp.vec3),
+    alpha: float,
+    c1: float,
+    # outputs: 
+    incremental_energy: wp.array(dtype=float)
+):
+    tid = wp.tid()
+
+    # incremental energy
+    incremental_energy_local = c1 * alpha * wp.dot(residual[tid], dx[tid])
+
+    # accumulate
+    wp.atomic_add(incremental_energy, 0, incremental_energy_local)
+
+@wp.kernel
+def zcy_accumulate_inertia_energy(
+    pos_warp: wp.array(dtype=wp.vec3),
+    pos_prev_warp: wp.array(dtype=wp.vec3),
+    vel_warp: wp.array(dtype=wp.vec3),
+    dt: float,
+    mass: float,
+    gravity: wp.vec3,
+    # fixed particle
+    free_particle_offset: wp.array(dtype=wp.int32),
+    # outputs: 
+    energy: wp.array(dtype=float)
+):
+    tid = wp.tid() 
+    free_particle = tid + free_particle_offset[tid]
+
+    # inertia
+    inertia = pos_warp[free_particle] - pos_prev_warp[free_particle] - dt * vel_warp[free_particle]
+
+    energy_inertia = 0.5 * mass * wp.dot(inertia, inertia) /dt/dt  - mass * wp.dot(pos_warp[free_particle], gravity)
+
+    wp.atomic_add(energy, 0, energy_inertia)
+
+@wp.kernel
+def zcy_accumulate_contact_energy(
+    # inputs
+    pos: wp.array(dtype=wp.vec3),
+    tri_indices: wp.array(dtype=wp.int32, ndim=2),
+    edge_indices: wp.array(dtype=wp.int32, ndim=2),
+    # self contact
+    collision_info_array: wp.array(dtype=TriMeshCollisionInfo),
+    collision_radius: float,
+    soft_contact_ke: float,
+    edge_edge_parallel_epsilon: float,
+    # outputs: 
+    energy: wp.array(dtype=float)
+):
+    
+    t_id = wp.tid()
+    collision_info = collision_info_array[0]
+    
+    # process edge-edge collisions
+    if t_id * 2 < collision_info.edge_colliding_edges.shape[0]:
+        e1_idx = collision_info.edge_colliding_edges[2 * t_id]
+        e2_idx = collision_info.edge_colliding_edges[2 * t_id + 1]
+
+        if e1_idx != -1 and e2_idx != -1:
+            e1_v1 = edge_indices[e1_idx, 2]
+            e1_v2 = edge_indices[e1_idx, 3]
+            e2_v1 = edge_indices[e2_idx, 2]
+            e2_v2 = edge_indices[e2_idx, 3]
+
+            e1_v1_pos = pos[e1_v1]
+            e1_v2_pos = pos[e1_v2]
+            e2_v1_pos = pos[e2_v1]
+            e2_v2_pos = pos[e2_v2]
+
+            st = wp.closest_point_edge_edge(e1_v1_pos, e1_v2_pos, e2_v1_pos, e2_v2_pos, edge_edge_parallel_epsilon)
+            s = st[0]
+            t = st[1]
+            dis = st[2]
+
+            if 0.0 < dis < collision_radius:
+                tau = collision_radius * 0.5
+                if tau > dis > 0.0:
+                    k2 = 0.5 * tau * tau * soft_contact_ke
+                    b = 0.5 * soft_contact_ke * (collision_radius - tau) * (collision_radius - tau) + k2 * wp.log(tau)
+                    energy_edge = -k2 * wp.log(dis) + b
+                else:
+                    energy_edge = 0.5 * soft_contact_ke * (collision_radius - dis) * (collision_radius - dis)
+                #加两遍，除2
+                wp.atomic_add(energy, 0, energy_edge / 2.0)
+
+    # process vertex-triangle collisions
+    if t_id * 2 < collision_info.vertex_colliding_triangles.shape[0]:
+        particle_idx = collision_info.vertex_colliding_triangles[2 * t_id]
+        tri_idx = collision_info.vertex_colliding_triangles[2 * t_id + 1]
+
+        if particle_idx != -1 and tri_idx != -1:           
+            tri_a = pos[tri_indices[tri_idx, 0]]
+            tri_b = pos[tri_indices[tri_idx, 1]]
+            tri_c = pos[tri_indices[tri_idx, 2]]
+            p = pos[particle_idx]
+
+            closest_p, bary, feature_type = triangle_closest_point(tri_a, tri_b, tri_c, p)
+            diff = p - closest_p
+            dis = wp.length(diff)
+
+            if 0.0 < dis < collision_radius:
+                tau = collision_radius * 0.5
+                if tau > dis > 0.0:
+                    k2 = 0.5 * tau * tau * soft_contact_ke
+                    b = 0.5 * soft_contact_ke * (collision_radius - tau) * (collision_radius - tau) + k2 * wp.log(tau)
+                    energy_vt = -k2 * wp.log(dis) + b
+                else:
+                    energy_vt = 0.5 * soft_contact_ke * (collision_radius - dis) * (collision_radius - dis)
+
+                wp.atomic_add(energy, 0, energy_vt)
+
+@wp.kernel
+def zcy_accumulate_spring_energy(
+    # inputs
+    pos: wp.array(dtype=wp.vec3),
+    # spring constraints
+    spring_indices: wp.array(dtype=int),
+    spring_rest_length: wp.array(dtype=float),
+    spring_stiffness: wp.array(dtype=float),
+    # outputs: particle force and hessian
+    total_energy: wp.array(dtype=float)
+):
+    spring_index = wp.tid()
+    # 获取两个端点
+    i = spring_indices[spring_index * 2]
+    j = spring_indices[spring_index * 2 + 1]
+    v0 = pos[i]
+    v1 = pos[j]
+
+    # 弹簧能量
+    rest_len = spring_rest_length[spring_index]
+    k = spring_stiffness[spring_index]
+    dis = wp.length(v1 - v0)
+    energy_spring = 0.5 * k * (dis - rest_len) * (dis - rest_len)
+    
+    # --- 累加到总能量 ---
+    wp.atomic_add(total_energy, 0, energy_spring)
+
+@wp.kernel
+def zcy_accumulate_stvk_energy(
+    pos: wp.array(dtype=wp.vec3),
+    tri_indices: wp.array(dtype=wp.int32, ndim=2),
+    tri_poses: wp.array(dtype=wp.mat22),
+    tri_materials: wp.array(dtype=float, ndim=2),
+    tri_areas: wp.array(dtype=float),
+    total_energy: wp.array(dtype=float)
+):
+    tri_index = wp.tid()
+    
+    # 获取当前三角形的索引
+    v0 = tri_indices[tri_index, 0]
+    v1 = tri_indices[tri_index, 1]
+    v2 = tri_indices[tri_index, 2]
+
+    # 获取材料参数
+    mu = tri_materials[tri_index, 0]
+    lmbd = tri_materials[tri_index, 1]
+    area = tri_areas[tri_index]
+
+    # 1) 组装 F 的两列
+    x0 = pos[v0]
+    x01 = pos[v1] - x0
+    x02 = pos[v2] - x0
+
+    DmInv = tri_poses[tri_index]
+    DmInv00 = DmInv[0, 0]
+    DmInv01 = DmInv[0, 1]
+    DmInv10 = DmInv[1, 0]
+    DmInv11 = DmInv[1, 1]
+
+    f0 = x01 * DmInv00 + x02 * DmInv10
+    f1 = x01 * DmInv01 + x02 * DmInv11
+
+    # 2) Green 应变 G = 0.5 * (F^T F - I)
+    f0f0 = wp.dot(f0, f0)
+    f1f1 = wp.dot(f1, f1)
+    f0f1 = wp.dot(f0, f1)
+
+    G00 = 0.5 * (f0f0 - 1.0)
+    G11 = 0.5 * (f1f1 - 1.0)
+    G01 = 0.5 * f0f1
+    
+    # 3) StVK 能量密度计算
+    # Psi = mu * tr(G^2) + 0.5 * lambda * (tr(G))^2
+    # tr(G) = G00 + G11
+    # tr(G^2) = G00^2 + G11^2 + 2 * G01^2
+    
+    tr_G = G00 + G11
+    tr_G_sq = G00 * G00 + G11 * G11 + 2.0 * G01 * G01
+    
+    energy_density = mu * tr_G_sq + 0.5 * lmbd * tr_G * tr_G
+    
+    # 累加能量 (Psi * area)
+    wp.atomic_add(total_energy, 0, energy_density * area)
+
+
+@wp.kernel
+def zcy_accumulate_bending_energy(
+    pos: wp.array(dtype=wp.vec3),
+    edge_indices: wp.array(dtype=wp.int32, ndim=2),
+    edge_rest_angle: wp.array(dtype=float),
+    edge_rest_length: wp.array(dtype=float),
+    edge_bending_properties: wp.array(dtype=float, ndim=2),
+    total_energy: wp.array(dtype=float)
+):
+    edge_index = wp.tid()
+
+    # Skip invalid edges
+    if edge_indices[edge_index, 0] == -1 or edge_indices[edge_index, 1] == -1:
+        return
+
+    vi0 = edge_indices[edge_index, 0]
+    vi1 = edge_indices[edge_index, 1]
+    vi2 = edge_indices[edge_index, 2]
+    vi3 = edge_indices[edge_index, 3]
+
+    x0 = pos[vi0]
+    x1 = pos[vi1]
+    x2 = pos[vi2]
+    x3 = pos[vi3]
+
+    # Compute edge vectors
+    x02 = x2 - x0
+    x03 = x3 - x0
+    x13 = x3 - x1
+    x12 = x2 - x1
+    e = x3 - x2
+
+    # Compute normals
+    n1 = wp.cross(x02, x03)
+    n2 = wp.cross(x13, x12)
+
+    eps = 1.0e-6
+    n1_norm = wp.length(n1)
+    n2_norm = wp.length(n2)
+    e_norm = wp.length(e)
+
+    if n1_norm < eps or n2_norm < eps or e_norm < eps:
+        return
+
+    n1_hat = n1 / n1_norm
+    n2_hat = n2 / n2_norm
+    e_hat = e / e_norm
+
+    sin_theta = wp.dot(wp.cross(n1_hat, n2_hat), e_hat)
+    cos_theta = wp.dot(n1_hat, n2_hat)
+    theta = wp.atan2(sin_theta, cos_theta)
+
+    # Bending Energy Calculation
+    # E = 0.5 * k * (theta - theta_0)^2
+    # k = stiffness * rest_length
+    
+    stiffness = edge_bending_properties[edge_index, 0]
+    k = stiffness * edge_rest_length[edge_index]
+    
+    diff = theta - edge_rest_angle[edge_index]
+    energy = 0.5 * k * diff * diff
+
+    wp.atomic_add(total_energy, 0, energy)
+
+
+@wp.kernel
+def zcy_update_position_line_search(
+    pos: wp.array(dtype=wp.vec3), 
+    dx: wp.array(dtype=wp.vec3), 
+    alpha: float,
+    all_particle_flag: wp.array(dtype=wp.int32),
+    pos_prev_collision_detection: wp.array(dtype=wp.vec3),
+    particle_conservative_bounds: wp.array(dtype=float),
+):
+    particle_index = wp.tid()
+
+    if all_particle_flag[particle_index] == -1:
+        return
+
+    offset = all_particle_flag[particle_index]
+    pos_before_truncation = pos[particle_index] + alpha * dx[particle_index-offset]
+    
+    pos_local, dx_local = zcy_apply_conservative_bound_truncation(
+        particle_index, pos_before_truncation, pos_prev_collision_detection, particle_conservative_bounds
+    )
+
+    pos[particle_index] = pos_local
+    dx[particle_index-offset] = dx_local
 
 @wp.kernel
 def zcy_update_velocity(
@@ -2873,7 +3191,7 @@ class zcy_SolverVBD(SolverBase):
         self.all_particle_flag = all_particle_flag
 
         # sparse hessian
-        self.spring = 0
+        self.spring = 1
         self.num_spring = self.spring_rest_length.shape[0]
         self.num_triangles = self.model.tri_indices.shape[0]
 
@@ -2907,6 +3225,10 @@ class zcy_SolverVBD(SolverBase):
         # contact
         self.zcy_pre_and_refit_contact_size()
 
+        # line search
+        self.energy = 0.0
+        self.residual = wp.zeros(shape=(self.free_particle_num,), dtype=wp.vec3)
+
         # endregion: my
 
 # zcy
@@ -2917,20 +3239,27 @@ class zcy_SolverVBD(SolverBase):
         self.zcy_collision_detection_penetration_free(pos_prev_warp)
         
         # forward
-        self.zcy_forward_step_penetration_free(pos_warp, pos_prev_warp, vel_warp, dt)
+        self.zcy_forward_step_penetration_free(pos_warp, pos_prev_warp, vel_warp, dt, forward_type=1)
 
         # after initialization, we need new collision detection to update the bounds
         # collision detection
-        # self.zcy_collision_detection_penetration_free(pos_warp)
+        self.zcy_collision_detection_penetration_free(pos_warp)
 
+        _, residual_norm_forward = self.zcy_compute_residual(pos_warp, pos_prev_warp, vel_warp, dt, mass)
+        energy_forward = self.zcy_compute_energy(pos_warp, pos_prev_warp, vel_warp, dt, mass)
+        print('residual_norm_forward:', residual_norm_forward, 'energy_forward:', energy_forward)
+        
         for _iter in range(num_iter):
+            # break
+            if residual_norm_forward < 1e-5:
+                break
+
             # collision detection
             self.zcy_collision_detection_penetration_free(pos_warp)
 
             # assemble matrix and vector
             A = self.zcy_assemble_matrix(pos_warp)
             b = self.zcy_assemble_vector(pos_warp, pos_prev_warp, vel_warp, dt, mass)
-
             '''
             # preallocate memory for dx
             dx = wp.zeros_like(b)
@@ -2939,30 +3268,110 @@ class zcy_SolverVBD(SolverBase):
             print(f'\n --- iter:{_iter} ---')
             print('cg_result:', result)
             '''
-            dx = spsolve(A.tocsr(), b.numpy().reshape(self.free_particle_num*3))
+            dx = spsolve(A.tocsr(), b.numpy().reshape(self.free_particle_num*3).astype(np.float64))
             dx = wp.array(dx.reshape(self.free_particle_num,3), dtype=wp.vec3)
 
-            # update position and truncation
-            wp.launch(
-                kernel=zcy_update_position,
-                inputs=[pos_warp, 
-                        dx, 
-                        self.all_particle_flag, 
-                        self.pos_prev_collision_detection, 
-                        self.particle_conservative_bounds,
-                        ],
-                dim=self.num_particle,
-                device=self.device,
-            )
+            ### line search
+            # region: line search
+            # 0.parameters
+            c1 = 1e-3
+            alpha = 1
+            gamma = 0.5
+            pos_warp_test_alpha = wp.zeros_like(pos_warp)
+            dx_alpha = wp.zeros_like(dx)
 
-            # truncation
-            # self.zcy_truncation_by_conservative_bound(pos_warp)
+            # 1.0.compute residual
+            residual, residual_norm0 = self.zcy_compute_residual(pos_warp, pos_prev_warp, vel_warp, dt, mass)
 
-            # compute residual
-            residual_norm = self.zcy_compute_residual(pos_warp, pos_prev_warp, vel_warp, dt, mass)
-            print('residual_norm:', residual_norm)
+            # 1.1.compute energy0
+            energy0 = self.zcy_compute_energy(pos_warp, pos_prev_warp, vel_warp, dt, mass)
 
-            # final frame
+            # 0.line search 
+            for _line_search_times in range(10):
+                # assign
+                pos_warp_test_alpha.assign(pos_warp)
+                dx_alpha.assign(dx)
+
+                # update position and truncation
+                wp.launch(
+                    kernel=zcy_update_position_line_search,
+                    inputs=[pos_warp_test_alpha, 
+                            dx_alpha, 
+                            alpha,
+                            self.all_particle_flag, 
+                            self.pos_prev_collision_detection, 
+                            self.particle_conservative_bounds,
+                            ], 
+                    dim=self.num_particle,
+                    device=self.device,
+                )
+                
+                # 1.2.compute energy1
+                energy1 = self.zcy_compute_energy(pos_warp_test_alpha, pos_prev_warp, vel_warp, dt, mass)
+                # 1.3.compute incremental energy
+                incremental_energy = self.zcy_compute_incremental_energy(residual, dx, alpha, c1)
+                
+                # 1.4.check armijo condition
+                _, residual_norm1 = self.zcy_compute_residual(pos_warp_test_alpha, pos_prev_warp, vel_warp, dt, mass)
+                '''
+                print('residual_norm0:', residual_norm0)
+                print('residual_norm1:', residual_norm1)
+                print('energy0:', energy0)
+                print('energy1:', energy1)
+                print('incremental_energy:', incremental_energy)
+                '''
+                # line search warning
+                if _line_search_times == 50 or incremental_energy.numpy()[0] > 0.0 : #
+                    # 优化信息
+                    A_dense = A.tocsr().toarray()
+                    A_sym = (A_dense + A_dense.T) * 0.5
+                    try:
+                        cond = float(np.linalg.cond(A_dense))
+                    except Exception:
+                        cond = float("inf")
+                    is_symmetric = bool(np.allclose(A_dense, A_dense.T, atol=1e-8))
+                    is_spd = False
+                    eig_min = float("nan")
+                    eig_max = float("nan")
+                    try:
+                        eigvals = np.linalg.eigvalsh(A_sym)
+                        eig_min = float(eigvals.min())
+                        eig_max = float(eigvals.max())
+                        is_spd = bool(eig_min > 0.0 and is_symmetric)
+                    except Exception:
+                        try:
+                            np.linalg.cholesky(A_sym)
+                            is_spd = bool(is_symmetric)
+                        except Exception:
+                            is_spd = False
+                    print('A.condition_number_and_spd:\n')
+                    print('[cond, is_symmetric, is_spd, eig_min, eig_max]\n')
+                    print(str([cond, is_symmetric, is_spd, eig_min, eig_max]) + "\n\n")
+
+                    print('x', pos_warp)
+                    raise RuntimeError(f"\n--- warning: {time_step} line search reach max iter {_line_search_times} or incremental_energy > 0.0 {incremental_energy.numpy()[0]} ---\n")
+                
+                if abs(incremental_energy.numpy()[0]) < energy0 * 1e-16:
+                    break
+
+                if energy1.numpy()[0] < energy0.numpy()[0] + incremental_energy.numpy()[0]:
+                    break
+                else:
+                    alpha *= gamma
+
+            # endregion
+            pos_warp, pos_warp_test_alpha = pos_warp_test_alpha, pos_warp
+            dx, dx_alpha = dx_alpha, dx
+            _, residual_norm = self.zcy_compute_residual(pos_warp, pos_prev_warp, vel_warp, dt, mass)
+            energy = self.zcy_compute_energy(pos_warp, pos_prev_warp, vel_warp, dt, mass)
+            print('residual_norm:', residual_norm, '|energy:', energy, '|incremental_energy:', incremental_energy, '|alpha:', alpha)
+            #print('residual', np.max(residual.numpy()), np.min(residual.numpy()))
+            #print('dx:', np.max(dx.numpy()), np.min(dx.numpy()))
+            
+            if residual_norm < tolerance or residual_norm/residual_norm_forward < 1e-3 or energy0.numpy()[0]-energy1.numpy()[0] < energy0 * 1e-6:
+                break
+
+            # region: iteration information 
             '''
             if time_step == 216:
                 print('\n--- warning information ---')
@@ -2974,7 +3383,7 @@ class zcy_SolverVBD(SolverBase):
                 print('particle_conservative_bounds:', self.particle_conservative_bounds)
                 print('pos_warp:', pos_warp)
                 print('vel_warp:', vel_warp)
-            '''
+            
             if time_step == 47 or time_step == 48:
                 log_path = "debug_unit_stiff_contact4.txt"
 
@@ -3040,7 +3449,7 @@ class zcy_SolverVBD(SolverBase):
                     f.write('vel_warp:\n')
                     f.write(str(vel_warp) + "\n\n")
                 #print(f"\nDebug info written to {log_path}\n")
-
+            '''
             if _iter == num_iter - 1:
                 print('\n--- warning information ---')
                 print('collision_info:\n', self.trimesh_collision_detector.collision_info)
@@ -3064,12 +3473,11 @@ class zcy_SolverVBD(SolverBase):
 
                 raise RuntimeError(f"\n--- warning: {time_step} time steps reach max iter {_iter} ---\n")
 
-            
+            '''
             if residual_norm < tolerance :
                 break
             if residual_norm < 1e-4 and _iter > 5:
                 break
-            '''
             if residual_norm < 1e-2 and _iter > 15:
                 break
             if residual_norm < 1e-3 and _iter > 10:
@@ -3077,6 +3485,7 @@ class zcy_SolverVBD(SolverBase):
             if residual_norm < 1e-2 and _iter > 15:
                 break
             '''
+            # endregion
 
         wp.launch(
             kernel=zcy_update_velocity,
@@ -3164,6 +3573,7 @@ class zcy_SolverVBD(SolverBase):
                 self.spring_forces,
                 self.edge_contact_forces,
                 self.vt_contact_forces,
+                self.bending_forces,
                 # fixed particle
                 self.free_particle_offset,
                 # outputs: 
@@ -3174,7 +3584,121 @@ class zcy_SolverVBD(SolverBase):
         )
 
         residual_norm = np.linalg.norm(np.linalg.norm(residual.numpy(), axis=1))
-        return residual_norm
+        return residual, residual_norm
+
+    def zcy_compute_energy(self, pos_warp, pos_prev_warp, vel_warp, dt, mass):
+
+        energy = wp.zeros(shape=(1,), dtype=float)
+
+        # inertia energy
+        wp.launch(
+            kernel=zcy_accumulate_inertia_energy,
+            inputs=[
+                pos_warp,
+                pos_prev_warp,
+                vel_warp,
+                dt,
+                mass,
+                self.model.gravity,
+                # fixed particle
+                self.free_particle_offset,
+                # outputs: 
+                energy
+            ],
+            dim=self.free_particle_num,
+            device=self.device,
+        )
+
+        # contact energy
+        wp.launch(
+            kernel=zcy_accumulate_contact_energy,
+            inputs=[
+                pos_warp,
+                self.model.tri_indices,
+                self.model.edge_indices,
+                # self-contact
+                self.trimesh_collision_info,
+                self.self_contact_radius,
+                self.model.soft_contact_ke,
+                self.trimesh_collision_detector.edge_edge_parallel_epsilon,
+                # outputs: 
+                energy
+            ],
+            dim=self.num_contact,
+            device=self.device,
+        )
+
+        # elastic energy
+        if self.spring :
+            wp.launch(
+                kernel=zcy_accumulate_spring_energy,
+                inputs=[
+                    pos_warp,
+                    # spring constraints
+                    self.spring_indices,
+                    self.spring_rest_length,
+                    self.spring_stiffness,
+                    # outputs: 
+                    energy
+                ],
+                dim=self.num_spring,
+                device=self.device,
+            )
+        else :
+            wp.launch(
+                kernel=zcy_accumulate_stvk_energy,
+                inputs=[
+                    pos_warp,
+                    # stvk force and hessian
+                    self.model.tri_indices,
+                    self.model.tri_poses,
+                    self.model.tri_materials,
+                    self.model.tri_areas,
+                    # outputs: 
+                    energy
+                ],
+                dim=self.num_triangles,
+                device=self.device,
+            )
+
+        # bending energy
+        wp.launch(
+            kernel=zcy_accumulate_bending_energy,
+            inputs=[
+                pos_warp,
+                # bending force and hessian
+                self.model.edge_indices,
+                self.model.edge_rest_angle,
+                self.model.edge_rest_length,
+                self.model.edge_bending_properties,
+                # output
+                energy
+            ],
+            dim=self.num_spring,
+            device=self.device,
+        )
+
+        return energy
+
+    def zcy_compute_incremental_energy(self, residual, dx, alpha, c1):
+        # init
+        incremental_energy = wp.zeros(shape=(1,), dtype=float)
+
+        wp.launch(
+            kernel=zcy_compute_incremental_energy,
+            inputs=[
+                residual,
+                dx,
+                alpha,
+                c1,
+                # outputs: 
+                incremental_energy
+            ],
+            dim=self.free_particle_num,
+            device=self.device,
+        )
+
+        return incremental_energy
 
 
     def zcy_compute_static_matrix(self, dt, mass):
@@ -3254,8 +3778,6 @@ class zcy_SolverVBD(SolverBase):
         self, pos_warp,
     ):
         # choose energy
-        spring = 0
-
         # spring
         self.spring_forces.zero_()
         self.spring_hessian_values.zero_()
@@ -3263,7 +3785,7 @@ class zcy_SolverVBD(SolverBase):
         self.spring_hessian_cols.zero_()
 
         # dim
-        if spring :
+        if self.spring :
             wp.launch(
                 kernel=zcy_accumulate_spring_force_and_hessian,
                 inputs=[
@@ -3349,7 +3871,7 @@ class zcy_SolverVBD(SolverBase):
 
 
     def zcy_forward_step_penetration_free(
-        self, pos_warp, pos_prev_warp, vel_warp, dt: float
+        self, pos_warp, pos_prev_warp, vel_warp, dt: float, forward_type: int = 0
     ):
         model=self.model
 
@@ -3361,6 +3883,7 @@ class zcy_SolverVBD(SolverBase):
             kernel=zcy_forward_step_penetration_free,
             inputs=[
                 dt,
+                forward_type,
                 model.gravity,
                 pos_prev_warp,
                 pos_warp,
