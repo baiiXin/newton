@@ -3191,7 +3191,7 @@ class zcy_SolverVBD(SolverBase):
         self.all_particle_flag = all_particle_flag
 
         # sparse hessian
-        self.spring = 1
+        self.spring = 0
         self.num_spring = self.spring_rest_length.shape[0]
         self.num_triangles = self.model.tri_indices.shape[0]
 
@@ -3246,15 +3246,26 @@ class zcy_SolverVBD(SolverBase):
         self.zcy_collision_detection_penetration_free(pos_warp)
 
         # residual_start
-        _, residual_norm_forward = self.zcy_compute_residual(pos_warp, pos_prev_warp, vel_warp, dt, mass)
+        residual_forward, residual_norm_forward = self.zcy_compute_residual(pos_warp, pos_prev_warp, vel_warp, dt, mass)
         energy_forward = self.zcy_compute_energy(pos_warp, pos_prev_warp, vel_warp, dt, mass)
+
         print('residual_norm_forward:', residual_norm_forward, 'energy_forward:', energy_forward)
         
-        last_residual_norm = residual_norm_forward
+        # debug_information_log
+        log_residual_path = "run_twist_cloth_residual_log.txt"
+        log_warning_path = "run_twist_cloth_warning_log.txt"
+        with open(log_residual_path, "a", encoding="utf-8") as f:
+                f.write(f'--- time_step: {time_step} ---\n')
+                f.write(f'forward: residual_norm_forward: {residual_norm_forward}, energy_forward: {energy_forward}\n')
+
+        # line search start
+        residual0 = residual_forward
+        residual_norm0 = residual_norm_forward
+        energy0 = energy_forward
         for _iter in range(num_iter):
             # break
-            #if last_residual_norm < 1e-5:
-            #    break
+            if residual_norm_forward < 1e-5:
+                break
 
             # collision detection
             self.zcy_collision_detection_penetration_free(pos_warp)
@@ -3282,14 +3293,8 @@ class zcy_SolverVBD(SolverBase):
             pos_warp_test_alpha = wp.zeros_like(pos_warp)
             dx_alpha = wp.zeros_like(dx)
 
-            # 1.0.compute residual
-            residual, residual_norm0 = self.zcy_compute_residual(pos_warp, pos_prev_warp, vel_warp, dt, mass)
-
-            # 1.1.compute energy0
-            energy0 = self.zcy_compute_energy(pos_warp, pos_prev_warp, vel_warp, dt, mass)
-
             # 0.line search 
-            for _line_search_times in range(10):
+            for _line_search_times in range(20):
                 # assign
                 pos_warp_test_alpha.assign(pos_warp)
                 dx_alpha.assign(dx)
@@ -3311,10 +3316,10 @@ class zcy_SolverVBD(SolverBase):
                 # 1.2.compute energy1
                 energy1 = self.zcy_compute_energy(pos_warp_test_alpha, pos_prev_warp, vel_warp, dt, mass)
                 # 1.3.compute incremental energy
-                incremental_energy = self.zcy_compute_incremental_energy(residual, dx, alpha, c1)
-                
+                incremental_energy = self.zcy_compute_incremental_energy(residual0, dx, alpha, c1)
                 # 1.4.check armijo condition
-                _, residual_norm1 = self.zcy_compute_residual(pos_warp_test_alpha, pos_prev_warp, vel_warp, dt, mass)
+                residual1, residual_norm1 = self.zcy_compute_residual(pos_warp_test_alpha, pos_prev_warp, vel_warp, dt, mass)
+
                 '''
                 print('residual_norm0:', residual_norm0)
                 print('residual_norm1:', residual_norm1)
@@ -3322,8 +3327,14 @@ class zcy_SolverVBD(SolverBase):
                 print('energy1:', energy1)
                 print('incremental_energy:', incremental_energy)
                 '''
+
+                if energy1.numpy().item() < energy0.numpy().item() + incremental_energy.numpy().item() and residual_norm1 < residual_norm0 + 1e-6 :
+                    break
+                else:
+                    alpha *= gamma
+
                 # line search warning
-                if _line_search_times == 50 or incremental_energy.numpy().item() > 0.0 : #
+                if _line_search_times == 19 or incremental_energy.numpy().item() > 0.0 : 
                     # 优化信息
                     A_dense = A.tocsr().toarray()
                     A_sym = (A_dense + A_dense.T) * 0.5
@@ -3346,10 +3357,24 @@ class zcy_SolverVBD(SolverBase):
                             is_spd = bool(is_symmetric)
                         except Exception:
                             is_spd = False
-                    print('A.condition_number_and_spd:\n')
-                    print('[cond, is_symmetric, is_spd, eig_min, eig_max]\n')
-                    print(str([cond, is_symmetric, is_spd, eig_min, eig_max]) + "\n\n")
 
+                    # 写入报错信息：
+                    with open(log_warning_path, "a", encoding="utf-8") as f:
+                        f.write(f'time_step: {time_step} \n')
+                        f.write(f'iter: {_iter} \n')
+                        f.write(f'line_search_times: {_line_search_times} \n')
+                        f.write(f'incremental_energy: {incremental_energy} \n')
+                        f.write(f'cond: {cond} \n')
+                        f.write(f'is_symmetric: {is_symmetric} \n')
+                        f.write(f'is_spd: {is_spd} \n')
+                        f.write(f'eig_min: {eig_min} \n')
+                        f.write(f'eig_max: {eig_max} \n\n\n')
+                    
+                    #print('A.condition_number_and_spd:\n')
+                    #print('[cond, is_symmetric, is_spd, eig_min, eig_max]\n')
+                    #print(str([cond, is_symmetric, is_spd, eig_min, eig_max]) + "\n\n")
+
+                    '''
                     print('x', pos_warp)
                     try:
                         import os
@@ -3362,26 +3387,23 @@ class zcy_SolverVBD(SolverBase):
                     except Exception as e:
                         print(f"Failed to save debug frame: {e}")
                     raise RuntimeError(f"\n--- warning: {time_step} line search reach max iter {_line_search_times} or incremental_energy > 0.0 {incremental_energy.numpy()[0]} ---\n")
-                
-                if abs(incremental_energy.numpy().item()) < energy0.numpy().item() * 1e-16:
-                    print('到达数值精度')
-                    break
-
-                if energy1.numpy().item() < energy0.numpy().item() + incremental_energy.numpy().item() and residual_norm1 < residual_norm0:
-                    break
-                else:
-                    alpha *= gamma
-
+                    '''
             # endregion
+
+            energy0, energy1 = energy1, energy0
+            residual_norm0, residual_norm1 = residual_norm1, residual_norm0
+            residual0, residual1 = residual1, residual0
+
             pos_warp, pos_warp_test_alpha = pos_warp_test_alpha, pos_warp
             dx, dx_alpha = dx_alpha, dx
-            _, residual_norm = self.zcy_compute_residual(pos_warp, pos_prev_warp, vel_warp, dt, mass)
-            energy = self.zcy_compute_energy(pos_warp, pos_prev_warp, vel_warp, dt, mass)
-            print('residual_norm:', residual_norm, '|energy:', energy, '|incremental_energy:', incremental_energy, '|alpha:', alpha)
-            #print('residual', np.max(residual.numpy()), np.min(residual.numpy()))
-            #print('dx:', np.max(dx.numpy()), np.min(dx.numpy()))
             
-            if residual_norm < tolerance or residual_norm/residual_norm_forward < 1e-4 or energy0.numpy().item()-energy1.numpy().item() < energy0.numpy().item() * 1e-6:
+            print('residual_norm:', residual_norm0, '|energy:', energy0, '|incremental_energy:', incremental_energy, '|alpha:', alpha)
+            log_residual_path = "run_twist_cloth_residual_log.txt"
+            with open(log_residual_path, "a", encoding="utf-8") as f:
+                    # 写入当前迭代信息
+                    f.write(f'residual_norm: {residual_norm0} |energy: {energy0} |incremental_energy: {incremental_energy} |alpha: {alpha}\n\n')
+            
+            if residual_norm0 < tolerance or residual_norm0/residual_norm_forward < 1e-4 :
                 break
 
             # region: iteration information 
@@ -3462,7 +3484,7 @@ class zcy_SolverVBD(SolverBase):
                     f.write('vel_warp:\n')
                     f.write(str(vel_warp) + "\n\n")
                 #print(f"\nDebug info written to {log_path}\n")
-            '''
+            
             if _iter == num_iter - 1 or residual_norm > 10.0*residual_norm_forward or energy.numpy().item() > energy0.numpy().item():
                 print('\n--- warning information ---')
                 print('collision_info:\n', self.trimesh_collision_detector.collision_info)
@@ -3526,19 +3548,41 @@ class zcy_SolverVBD(SolverBase):
                 print(f"energy.numpy().item() > energy0.numpy().item(): {energy.numpy().item() > energy0.numpy().item()}")
 
                 raise RuntimeError(f"\n--- warning: {time_step} time steps reach max iter {_iter} ---\n")
+            '''
+            if _iter == num_iter - 1:
+                # 优化信息
+                A_dense = A.tocsr().toarray()
+                A_sym = (A_dense + A_dense.T) * 0.5
+                try:
+                    cond = float(np.linalg.cond(A_dense))
+                except Exception:
+                    cond = float("inf")
+                is_symmetric = bool(np.allclose(A_dense, A_dense.T, atol=1e-8))
+                is_spd = False
+                eig_min = float("nan")
+                eig_max = float("nan")
+                try:
+                    eigvals = np.linalg.eigvalsh(A_sym)
+                    eig_min = float(eigvals.min())
+                    eig_max = float(eigvals.max())
+                    is_spd = bool(eig_min > 0.0 and is_symmetric)
+                except Exception:
+                    try:
+                        np.linalg.cholesky(A_sym)
+                        is_spd = bool(is_symmetric)
+                    except Exception:
+                        is_spd = False
 
-            '''
-            if residual_norm < tolerance :
-                break
-            if residual_norm < 1e-4 and _iter > 5:
-                break
-            if residual_norm < 1e-2 and _iter > 15:
-                break
-            if residual_norm < 1e-3 and _iter > 10:
-                break
-            if residual_norm < 1e-2 and _iter > 15:
-                break
-            '''
+                with open(log_warning_path, "a", encoding="utf-8") as f:
+                    f.write(f'time_step: {time_step} \n')
+                    f.write(f'iter: {_iter} \n')
+                    f.write(f'line_search_times: {_line_search_times} \n')
+                    f.write(f'incremental_energy: {incremental_energy} \n')
+                    f.write(f'cond: {cond} \n')
+                    f.write(f'is_symmetric: {is_symmetric} \n')
+                    f.write(f'is_spd: {is_spd} \n')
+                    f.write(f'eig_min: {eig_min} \n')
+                    f.write(f'eig_max: {eig_max} \n\n\n')
             # endregion
 
         wp.launch(
