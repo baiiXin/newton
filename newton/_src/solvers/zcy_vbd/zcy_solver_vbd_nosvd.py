@@ -805,576 +805,7 @@ def evaluate_edge_edge_contact_2_vertices(
         return False, collision_force, collision_force, collision_hessian, collision_hessian
 
 # zcy
-# svd
-# ==============================================================================
-# 1. 辅助函数 (6x6)
-# ==============================================================================
 
-@wp.func
-def idx_6(r: int, c: int):
-    return r * 6 + c
-
-@wp.func
-def load_block_3x3_6(
-    row_block: int, col_block: int, 
-    base_offset: int, 
-    temp_buffer: wp.array(dtype=float), 
-    m: wp.mat33
-):
-    """ 将 mat33 写入 flatten array """
-    row_start = row_block * 3
-    col_start = col_block * 3
-    
-    # Row 0
-    temp_buffer[base_offset + idx_6(row_start+0, col_start+0)] = m[0, 0]
-    temp_buffer[base_offset + idx_6(row_start+0, col_start+1)] = m[0, 1]
-    temp_buffer[base_offset + idx_6(row_start+0, col_start+2)] = m[0, 2]
-    # Row 1
-    temp_buffer[base_offset + idx_6(row_start+1, col_start+0)] = m[1, 0]
-    temp_buffer[base_offset + idx_6(row_start+1, col_start+1)] = m[1, 1]
-    temp_buffer[base_offset + idx_6(row_start+1, col_start+2)] = m[1, 2]
-    # Row 2
-    temp_buffer[base_offset + idx_6(row_start+2, col_start+0)] = m[2, 0]
-    temp_buffer[base_offset + idx_6(row_start+2, col_start+1)] = m[2, 1]
-    temp_buffer[base_offset + idx_6(row_start+2, col_start+2)] = m[2, 2]
-
-@wp.func
-def reconstruct_block_3x3_6(
-    row_block: int, col_block: int, 
-    base_offset: int, offset_V: int, 
-    temp_buffer: wp.array(dtype=float)
-):
-    res = wp.mat33(0.0)
-    row_start = row_block * 3
-    col_start = col_block * 3
-    
-    for i in range(3):
-        for j in range(3):
-            global_r = row_start + i
-            global_c = col_start + j
-            
-            sum_val = float(0.0)
-            
-            # While loop
-            k = int(0)
-            while k < 6:
-                lam = temp_buffer[base_offset + idx_6(k, k)]
-                v_rk = temp_buffer[offset_V + idx_6(global_r, k)]
-                v_ck = temp_buffer[offset_V + idx_6(global_c, k)]
-                sum_val += v_rk * lam * v_ck
-                k += 1
-            
-            res[i, j] = sum_val
-    return res
-
-# ==============================================================================
-# 2. 核心设备函数 (6x6 Optimized)
-# ==============================================================================
-
-@wp.func
-def filter_hessian_6x6_device(
-    h_aa: wp.mat33, h_ab: wp.mat33,
-    h_ba: wp.mat33, h_bb: wp.mat33,
-    temp_buffer: wp.array(dtype=float),
-    tid: int
-):
-    # 6x6 needs 36(Mat) + 36(Vec) = 72 floats
-    base_offset = tid * 72
-    offset_V = base_offset + 36
-    
-    # --- 1. Load Data ---
-    load_block_3x3_6(0, 0, base_offset, temp_buffer, h_aa)
-    load_block_3x3_6(0, 1, base_offset, temp_buffer, h_ab)
-    load_block_3x3_6(1, 0, base_offset, temp_buffer, h_ba)
-    load_block_3x3_6(1, 1, base_offset, temp_buffer, h_bb)
-
-    # --- 2. Jacobi SVD ---
-    
-    # Init V
-    i = int(0)
-    while i < 6:
-        j = int(0)
-        while j < 6:
-            temp_buffer[offset_V + idx_6(i, j)] = 1.0 if i == j else 0.0
-            j += 1
-        i += 1
-
-    # 15 sweeps
-    iter_count = int(0)
-    while iter_count < 15:
-        p = int(0)
-        while p < 5:
-            q = p + 1
-            while q < 6:
-                idx_pq = base_offset + idx_6(p, q)
-                a_pq = temp_buffer[idx_pq]
-                
-                if wp.abs(a_pq) >= 1e-6:
-                    idx_pp = base_offset + idx_6(p, p)
-                    idx_qq = base_offset + idx_6(q, q)
-                    a_pp = temp_buffer[idx_pp]
-                    a_qq = temp_buffer[idx_qq]
-
-                    tau = (a_qq - a_pp) / (2.0 * a_pq)
-                    t = float(0.0)
-                    if tau >= 0.0: t = 1.0 / (tau + wp.sqrt(1.0 + tau*tau))
-                    else:          t = -1.0 / (-tau + wp.sqrt(1.0 + tau*tau))
-                    c = 1.0 / wp.sqrt(1.0 + t*t)
-                    s = t * c
-
-                    # Rotate A
-                    temp_buffer[idx_pp] = c*c*a_pp + s*s*a_qq - 2.0*c*s*a_pq
-                    temp_buffer[idx_qq] = s*s*a_pp + c*c*a_qq + 2.0*c*s*a_pq
-                    temp_buffer[idx_pq] = 0.0
-                    temp_buffer[base_offset + idx_6(q, p)] = 0.0
-
-                    # Rotate Rows/Cols
-                    k = int(0)
-                    while k < 6:
-                        if k != p and k != q:
-                            idx_ip = base_offset + idx_6(k, p)
-                            idx_iq = base_offset + idx_6(k, q)
-                            a_ip = temp_buffer[idx_ip]
-                            a_iq = temp_buffer[idx_iq]
-                            
-                            a_ip_n = c * a_ip - s * a_iq
-                            a_iq_n = s * a_ip + c * a_iq
-                            
-                            temp_buffer[idx_ip] = a_ip_n
-                            temp_buffer[base_offset + idx_6(p, k)] = a_ip_n
-                            temp_buffer[idx_iq] = a_iq_n
-                            temp_buffer[base_offset + idx_6(q, k)] = a_iq_n
-                        k += 1
-                    
-                    # Rotate V
-                    k = int(0)
-                    while k < 6:
-                        idx_ip = offset_V + idx_6(k, p)
-                        idx_iq = offset_V + idx_6(k, q)
-                        v_ip = temp_buffer[idx_ip]
-                        v_iq = temp_buffer[idx_iq]
-                        
-                        temp_buffer[idx_ip] = c * v_ip - s * v_iq
-                        temp_buffer[idx_iq] = s * v_ip + c * v_iq
-                        k += 1
-                q += 1
-            p += 1
-        iter_count += 1
-
-    # --- 3. Filter Eigenvalues ---
-    k = int(0)
-    while k < 6:
-        idx = base_offset + idx_6(k, k)
-        val = temp_buffer[idx]
-        temp_buffer[idx] = wp.max(val, 0.0)
-        k += 1
-
-    # --- 4. Reconstruct ---
-    out_aa = reconstruct_block_3x3_6(0, 0, base_offset, offset_V, temp_buffer)
-    out_ab = reconstruct_block_3x3_6(0, 1, base_offset, offset_V, temp_buffer)
-    out_ba = reconstruct_block_3x3_6(1, 0, base_offset, offset_V, temp_buffer)
-    out_bb = reconstruct_block_3x3_6(1, 1, base_offset, offset_V, temp_buffer)
-
-    return out_aa, out_ab, out_ba, out_bb
-
-# ==============================================================================
-# 1. 辅助函数 (9x9)
-# ==============================================================================
-
-@wp.func
-def idx_9(r: int, c: int):
-    return r * 9 + c
-
-@wp.func
-def load_block_3x3_9(
-    row_block: int, col_block: int, 
-    base_offset: int, 
-    temp_buffer: wp.array(dtype=float), 
-    m: wp.mat33
-):
-    """ 将 mat33 写入 flatten array """
-    row_start = row_block * 3
-    col_start = col_block * 3
-    
-    # Row 0
-    temp_buffer[base_offset + idx_9(row_start+0, col_start+0)] = m[0, 0]
-    temp_buffer[base_offset + idx_9(row_start+0, col_start+1)] = m[0, 1]
-    temp_buffer[base_offset + idx_9(row_start+0, col_start+2)] = m[0, 2]
-    # Row 1
-    temp_buffer[base_offset + idx_9(row_start+1, col_start+0)] = m[1, 0]
-    temp_buffer[base_offset + idx_9(row_start+1, col_start+1)] = m[1, 1]
-    temp_buffer[base_offset + idx_9(row_start+1, col_start+2)] = m[1, 2]
-    # Row 2
-    temp_buffer[base_offset + idx_9(row_start+2, col_start+0)] = m[2, 0]
-    temp_buffer[base_offset + idx_9(row_start+2, col_start+1)] = m[2, 1]
-    temp_buffer[base_offset + idx_9(row_start+2, col_start+2)] = m[2, 2]
-
-@wp.func
-def reconstruct_block_3x3_9(
-    row_block: int, col_block: int, 
-    base_offset: int, offset_V: int, 
-    temp_buffer: wp.array(dtype=float)
-):
-    res = wp.mat33(0.0)
-    row_start = row_block * 3
-    col_start = col_block * 3
-    
-    for i in range(3):
-        for j in range(3):
-            global_r = row_start + i
-            global_c = col_start + j
-            
-            sum_val = float(0.0) # Explicit float
-            
-            # While loop to prevent unrolling
-            k = int(0)
-            while k < 9:
-                lam = temp_buffer[base_offset + idx_9(k, k)]
-                v_rk = temp_buffer[offset_V + idx_9(global_r, k)]
-                v_ck = temp_buffer[offset_V + idx_9(global_c, k)]
-                sum_val += v_rk * lam * v_ck
-                k += 1
-            
-            res[i, j] = sum_val
-    return res
-
-# ==============================================================================
-# 2. 核心设备函数 (9x9 Optimized)
-# ==============================================================================
-
-@wp.func
-def filter_hessian_9x9_device(
-    h_aa: wp.mat33, h_ab: wp.mat33, h_ac: wp.mat33,
-    h_ba: wp.mat33, h_bb: wp.mat33, h_bc: wp.mat33,
-    h_ca: wp.mat33, h_cb: wp.mat33, h_cc: wp.mat33,
-    temp_buffer: wp.array(dtype=float),
-    tid: int
-):
-    # 9x9 needs 81(Mat) + 81(Vec) = 162 floats
-    base_offset = tid * 162
-    offset_V = base_offset + 81
-    
-    # --- 1. Load Data ---
-    load_block_3x3_9(0, 0, base_offset, temp_buffer, h_aa)
-    load_block_3x3_9(0, 1, base_offset, temp_buffer, h_ab)
-    load_block_3x3_9(0, 2, base_offset, temp_buffer, h_ac)
-    
-    load_block_3x3_9(1, 0, base_offset, temp_buffer, h_ba)
-    load_block_3x3_9(1, 1, base_offset, temp_buffer, h_bb)
-    load_block_3x3_9(1, 2, base_offset, temp_buffer, h_bc)
-    
-    load_block_3x3_9(2, 0, base_offset, temp_buffer, h_ca)
-    load_block_3x3_9(2, 1, base_offset, temp_buffer, h_cb)
-    load_block_3x3_9(2, 2, base_offset, temp_buffer, h_cc)
-
-    # --- 2. Jacobi SVD ---
-    
-    # Init V
-    i = int(0)
-    while i < 9:
-        j = int(0)
-        while j < 9:
-            temp_buffer[offset_V + idx_9(i, j)] = 1.0 if i == j else 0.0
-            j += 1
-        i += 1
-
-    # 15 sweeps
-    iter_count = int(0)
-    while iter_count < 15:
-        p = int(0)
-        while p < 8:
-            q = p + 1
-            while q < 9:
-                idx_pq = base_offset + idx_9(p, q)
-                a_pq = temp_buffer[idx_pq]
-                
-                if wp.abs(a_pq) >= 1e-6:
-                    idx_pp = base_offset + idx_9(p, p)
-                    idx_qq = base_offset + idx_9(q, q)
-                    a_pp = temp_buffer[idx_pp]
-                    a_qq = temp_buffer[idx_qq]
-
-                    tau = (a_qq - a_pp) / (2.0 * a_pq)
-                    t = float(0.0)
-                    if tau >= 0.0: t = 1.0 / (tau + wp.sqrt(1.0 + tau*tau))
-                    else:          t = -1.0 / (-tau + wp.sqrt(1.0 + tau*tau))
-                    c = 1.0 / wp.sqrt(1.0 + t*t)
-                    s = t * c
-
-                    # Rotate A
-                    temp_buffer[idx_pp] = c*c*a_pp + s*s*a_qq - 2.0*c*s*a_pq
-                    temp_buffer[idx_qq] = s*s*a_pp + c*c*a_qq + 2.0*c*s*a_pq
-                    temp_buffer[idx_pq] = 0.0
-                    temp_buffer[base_offset + idx_9(q, p)] = 0.0
-
-                    # Rotate Rows/Cols
-                    k = int(0)
-                    while k < 9:
-                        if k != p and k != q:
-                            idx_ip = base_offset + idx_9(k, p)
-                            idx_iq = base_offset + idx_9(k, q)
-                            a_ip = temp_buffer[idx_ip]
-                            a_iq = temp_buffer[idx_iq]
-                            
-                            a_ip_n = c * a_ip - s * a_iq
-                            a_iq_n = s * a_ip + c * a_iq
-                            
-                            temp_buffer[idx_ip] = a_ip_n
-                            temp_buffer[base_offset + idx_9(p, k)] = a_ip_n
-                            temp_buffer[idx_iq] = a_iq_n
-                            temp_buffer[base_offset + idx_9(q, k)] = a_iq_n
-                        k += 1
-                    
-                    # Rotate V
-                    k = int(0)
-                    while k < 9:
-                        idx_ip = offset_V + idx_9(k, p)
-                        idx_iq = offset_V + idx_9(k, q)
-                        v_ip = temp_buffer[idx_ip]
-                        v_iq = temp_buffer[idx_iq]
-                        
-                        temp_buffer[idx_ip] = c * v_ip - s * v_iq
-                        temp_buffer[idx_iq] = s * v_ip + c * v_iq
-                        k += 1
-                q += 1
-            p += 1
-        iter_count += 1
-
-    # --- 3. Filter Eigenvalues ---
-    k = int(0)
-    while k < 9:
-        idx = base_offset + idx_9(k, k)
-        val = temp_buffer[idx]
-        temp_buffer[idx] = wp.max(val, 0.0)
-        k += 1
-
-    # --- 4. Reconstruct ---
-    out_aa = reconstruct_block_3x3_9(0, 0, base_offset, offset_V, temp_buffer)
-    out_ab = reconstruct_block_3x3_9(0, 1, base_offset, offset_V, temp_buffer)
-    out_ac = reconstruct_block_3x3_9(0, 2, base_offset, offset_V, temp_buffer)
-    
-    out_ba = reconstruct_block_3x3_9(1, 0, base_offset, offset_V, temp_buffer)
-    out_bb = reconstruct_block_3x3_9(1, 1, base_offset, offset_V, temp_buffer)
-    out_bc = reconstruct_block_3x3_9(1, 2, base_offset, offset_V, temp_buffer)
-    
-    out_ca = reconstruct_block_3x3_9(2, 0, base_offset, offset_V, temp_buffer)
-    out_cb = reconstruct_block_3x3_9(2, 1, base_offset, offset_V, temp_buffer)
-    out_cc = reconstruct_block_3x3_9(2, 2, base_offset, offset_V, temp_buffer)
-
-    return out_aa, out_ab, out_ac, \
-           out_ba, out_bb, out_bc, \
-           out_ca, out_cb, out_cc
-
-# ==============================================================================
-# 1. 设备函数 (12x12 Jacobi Filtering)
-# ==============================================================================
-
-@wp.func
-def idx_12(r: int, c: int):
-    return r * 12 + c
-
-@wp.func
-def load_block_3x3_12(
-    row_block: int, col_block: int, 
-    base_offset: int, 
-    temp_buffer: wp.array(dtype=float), 
-    m: wp.mat33
-):
-    """ 将 mat33 写入 flatten array 的特定 block 位置 """
-    row_start = row_block * 3
-    col_start = col_block * 3
-    
-    # Row 0
-    temp_buffer[base_offset + idx_12(row_start+0, col_start+0)] = m[0, 0]
-    temp_buffer[base_offset + idx_12(row_start+0, col_start+1)] = m[0, 1]
-    temp_buffer[base_offset + idx_12(row_start+0, col_start+2)] = m[0, 2]
-    # Row 1
-    temp_buffer[base_offset + idx_12(row_start+1, col_start+0)] = m[1, 0]
-    temp_buffer[base_offset + idx_12(row_start+1, col_start+1)] = m[1, 1]
-    temp_buffer[base_offset + idx_12(row_start+1, col_start+2)] = m[1, 2]
-    # Row 2
-    temp_buffer[base_offset + idx_12(row_start+2, col_start+0)] = m[2, 0]
-    temp_buffer[base_offset + idx_12(row_start+2, col_start+1)] = m[2, 1]
-    temp_buffer[base_offset + idx_12(row_start+2, col_start+2)] = m[2, 2]
-
-@wp.func
-def reconstruct_block_3x3_12(
-    row_block: int, col_block: int, 
-    base_offset: int, offset_V: int, 
-    temp_buffer: wp.array(dtype=float)
-):
-    """ 重构 V * Lambda * V^T 并提取 3x3 """
-    res = wp.mat33(0.0)
-    row_start = row_block * 3
-    col_start = col_block * 3
-    
-    for i in range(3):
-        for j in range(3):
-            global_r = row_start + i
-            global_c = col_start + j
-            
-            # 【关键修复】使用 float(0.0) 声明这是一个可变的累加器
-            sum_val = float(0.0)
-            
-            # 使用 while 循环防止编译器过度展开
-            k = int(0)
-            while k < 12:
-                lam = temp_buffer[base_offset + idx_12(k, k)]
-                v_rk = temp_buffer[offset_V + idx_12(global_r, k)]
-                v_ck = temp_buffer[offset_V + idx_12(global_c, k)]
-                sum_val += v_rk * lam * v_ck
-                k += 1
-            
-            res[i, j] = sum_val
-    return res
-
-# ==============================================================================
-# 2. 核心设备函数 (While 循环 + 类型声明优化版)
-# ==============================================================================
-
-@wp.func
-def filter_hessian_12x12_device(
-    h_aa: wp.mat33, h_ab: wp.mat33, h_ac: wp.mat33, h_ad: wp.mat33,
-    h_ba: wp.mat33, h_bb: wp.mat33, h_bc: wp.mat33, h_bd: wp.mat33,
-    h_ca: wp.mat33, h_cb: wp.mat33, h_cc: wp.mat33, h_cd: wp.mat33,
-    h_da: wp.mat33, h_db: wp.mat33, h_dc: wp.mat33, h_dd: wp.mat33,
-    temp_buffer: wp.array(dtype=float),
-    tid: int
-):
-    base_offset = tid * 288
-    offset_V = base_offset + 144
-    
-    # --- 1. 加载数据 ---
-    load_block_3x3_12(0, 0, base_offset, temp_buffer, h_aa)
-    load_block_3x3_12(0, 1, base_offset, temp_buffer, h_ab)
-    load_block_3x3_12(0, 2, base_offset, temp_buffer, h_ac)
-    load_block_3x3_12(0, 3, base_offset, temp_buffer, h_ad)
-    
-    load_block_3x3_12(1, 0, base_offset, temp_buffer, h_ba)
-    load_block_3x3_12(1, 1, base_offset, temp_buffer, h_bb)
-    load_block_3x3_12(1, 2, base_offset, temp_buffer, h_bc)
-    load_block_3x3_12(1, 3, base_offset, temp_buffer, h_bd)
-    
-    load_block_3x3_12(2, 0, base_offset, temp_buffer, h_ca)
-    load_block_3x3_12(2, 1, base_offset, temp_buffer, h_cb)
-    load_block_3x3_12(2, 2, base_offset, temp_buffer, h_cc)
-    load_block_3x3_12(2, 3, base_offset, temp_buffer, h_cd)
-    
-    load_block_3x3_12(3, 0, base_offset, temp_buffer, h_da)
-    load_block_3x3_12(3, 1, base_offset, temp_buffer, h_db)
-    load_block_3x3_12(3, 2, base_offset, temp_buffer, h_dc)
-    load_block_3x3_12(3, 3, base_offset, temp_buffer, h_dd)
-
-    # --- 2. Jacobi 分解 ---
-    
-    # Init V Identity
-    i = int(0)
-    while i < 12:
-        j = int(0)
-        while j < 12:
-            temp_buffer[offset_V + idx_12(i, j)] = 1.0 if i == j else 0.0
-            j += 1
-        i += 1
-
-    # Main Loop: 15 sweeps
-    iter_count = int(0)
-    while iter_count < 15:
-        p = int(0)
-        while p < 11:
-            q = p + 1
-            while q < 12:
-                idx_pq = base_offset + idx_12(p, q)
-                a_pq = temp_buffer[idx_pq]
-                
-                # Threshold check
-                if wp.abs(a_pq) >= 1e-6:
-                    idx_pp = base_offset + idx_12(p, p)
-                    idx_qq = base_offset + idx_12(q, q)
-                    a_pp = temp_buffer[idx_pp]
-                    a_qq = temp_buffer[idx_qq]
-
-                    tau = (a_qq - a_pp) / (2.0 * a_pq)
-                    t = float(0.0) # Explicit float type
-                    if tau >= 0.0: t = 1.0 / (tau + wp.sqrt(1.0 + tau*tau))
-                    else:          t = -1.0 / (-tau + wp.sqrt(1.0 + tau*tau))
-                    c = 1.0 / wp.sqrt(1.0 + t*t)
-                    s = t * c
-
-                    # Rotate A
-                    temp_buffer[idx_pp] = c*c*a_pp + s*s*a_qq - 2.0*c*s*a_pq
-                    temp_buffer[idx_qq] = s*s*a_pp + c*c*a_qq + 2.0*c*s*a_pq
-                    temp_buffer[idx_pq] = 0.0
-                    temp_buffer[base_offset + idx_12(q, p)] = 0.0
-
-                    # Inner Loop: Rotate rows/cols
-                    k = int(0)
-                    while k < 12:
-                        if k != p and k != q:
-                            idx_ip = base_offset + idx_12(k, p)
-                            idx_iq = base_offset + idx_12(k, q)
-                            a_ip = temp_buffer[idx_ip]
-                            a_iq = temp_buffer[idx_iq]
-                            
-                            a_ip_n = c * a_ip - s * a_iq
-                            a_iq_n = s * a_ip + c * a_iq
-                            
-                            temp_buffer[idx_ip] = a_ip_n
-                            temp_buffer[base_offset + idx_12(p, k)] = a_ip_n
-                            temp_buffer[idx_iq] = a_iq_n
-                            temp_buffer[base_offset + idx_12(q, k)] = a_iq_n
-                        k += 1
-                    
-                    # Inner Loop: Rotate V
-                    k = int(0)
-                    while k < 12:
-                        idx_ip = offset_V + idx_12(k, p)
-                        idx_iq = offset_V + idx_12(k, q)
-                        v_ip = temp_buffer[idx_ip]
-                        v_iq = temp_buffer[idx_iq]
-                        
-                        temp_buffer[idx_ip] = c * v_ip - s * v_iq
-                        temp_buffer[idx_iq] = s * v_ip + c * v_iq
-                        k += 1
-
-                q += 1 
-            p += 1 
-        iter_count += 1 
-
-    # --- 3. 过滤特征值 ---
-    k = int(0)
-    while k < 12:
-        idx = base_offset + idx_12(k, k)
-        val = temp_buffer[idx]
-        temp_buffer[idx] = wp.max(val, 0.0)
-        k += 1
-
-    # --- 4. 重构并返回 ---
-    out_aa = reconstruct_block_3x3_12(0, 0, base_offset, offset_V, temp_buffer)
-    out_ab = reconstruct_block_3x3_12(0, 1, base_offset, offset_V, temp_buffer)
-    out_ac = reconstruct_block_3x3_12(0, 2, base_offset, offset_V, temp_buffer)
-    out_ad = reconstruct_block_3x3_12(0, 3, base_offset, offset_V, temp_buffer)
-    
-    out_ba = reconstruct_block_3x3_12(1, 0, base_offset, offset_V, temp_buffer)
-    out_bb = reconstruct_block_3x3_12(1, 1, base_offset, offset_V, temp_buffer)
-    out_bc = reconstruct_block_3x3_12(1, 2, base_offset, offset_V, temp_buffer)
-    out_bd = reconstruct_block_3x3_12(1, 3, base_offset, offset_V, temp_buffer)
-    
-    out_ca = reconstruct_block_3x3_12(2, 0, base_offset, offset_V, temp_buffer)
-    out_cb = reconstruct_block_3x3_12(2, 1, base_offset, offset_V, temp_buffer)
-    out_cc = reconstruct_block_3x3_12(2, 2, base_offset, offset_V, temp_buffer)
-    out_cd = reconstruct_block_3x3_12(2, 3, base_offset, offset_V, temp_buffer)
-    
-    out_da = reconstruct_block_3x3_12(3, 0, base_offset, offset_V, temp_buffer)
-    out_db = reconstruct_block_3x3_12(3, 1, base_offset, offset_V, temp_buffer)
-    out_dc = reconstruct_block_3x3_12(3, 2, base_offset, offset_V, temp_buffer)
-    out_dd = reconstruct_block_3x3_12(3, 3, base_offset, offset_V, temp_buffer)
-
-    return out_aa, out_ab, out_ac, out_ad, \
-           out_ba, out_bb, out_bc, out_bd, \
-           out_ca, out_cb, out_cc, out_cd, \
-           out_da, out_db, out_dc, out_dd
-
-# svd
 
 
 
@@ -1683,48 +1114,48 @@ def zcy_evaluate_edge_edge_contact_2_vertices(
         collision_hessian = d2E_dDdD * wp.outer(collision_normal, collision_normal)
 
         ### edge1
-        collision_force_a = collision_force * bs[0]
-        collision_force_b = collision_force * bs[1]
+        collision_force_10 = collision_force * bs[0]
+        collision_force_11 = collision_force * bs[1]
 
-        collision_hessian_aa = collision_hessian * bs[0] * bs[0]
-        collision_hessian_bb = collision_hessian * bs[1] * bs[1]
-        collision_hessian_ab = collision_hessian * bs[0] * bs[1] #+ bs[0] * bs[1] * friction_hessian
-        collision_hessian_ba = collision_hessian * bs[1] * bs[0] #+ bs[1] * bs[0] * friction_hessian
+        collision_hessian_10 = collision_hessian * bs[0] * bs[0]
+        collision_hessian_11 = collision_hessian * bs[1] * bs[1]
+        collision_hessian_101 = collision_hessian * bs[0] * bs[1] #+ bs[0] * bs[1] * friction_hessian
+        collision_hessian_110 = collision_hessian * bs[1] * bs[0] #+ bs[1] * bs[0] * friction_hessian
         # collision_normal_normal_sign = wp.vec4(1.0, 1.0, -1.0, -1.0)
 
         ### edge2
-        collision_force_c = collision_force * bs[2]
-        collision_force_d = collision_force * bs[3]
+        collision_force_20 = collision_force * bs[2]
+        collision_force_21 = collision_force * bs[3]
 
-        collision_hessian_cc = collision_hessian * bs[2] * bs[2]
-        collision_hessian_dd = collision_hessian * bs[3] * bs[3]
-        collision_hessian_cd = collision_hessian * bs[2] * bs[3] #+ bs[2] * bs[3] * friction_hessian
-        collision_hessian_dc = collision_hessian * bs[3] * bs[2] #+ bs[3] * bs[2] * friction_hessian
+        collision_hessian_20 = collision_hessian * bs[2] * bs[2]
+        collision_hessian_21 = collision_hessian * bs[3] * bs[3]
+        collision_hessian_201 = collision_hessian * bs[2] * bs[3] #+ bs[2] * bs[3] * friction_hessian
+        collision_hessian_210 = collision_hessian * bs[3] * bs[2] #+ bs[3] * bs[2] * friction_hessian
         # collision_normal_normal_sign = wp.vec4(1.0, 1.0, -1.0, -1.0)
 
         # edge1 to edge2
-        collision_hessian_ac = bs[0] * bs[2] * collision_hessian  #+ bs[0] * bs[2] * friction_hessian
-        collision_hessian_ad = bs[0] * bs[3] * collision_hessian  #+ bs[0] * bs[3] * friction_hessian
-        collision_hessian_bc = bs[1] * bs[2] * collision_hessian  #+ bs[1] * bs[2] * friction_hessian
-        collision_hessian_bd = bs[1] * bs[3] * collision_hessian  #+ bs[1] * bs[3] * friction_hessian
+        collision_hessian_1200 = bs[0] * bs[2] * collision_hessian  #+ bs[0] * bs[2] * friction_hessian
+        collision_hessian_1201 = bs[0] * bs[3] * collision_hessian  #+ bs[0] * bs[3] * friction_hessian
+        collision_hessian_1210 = bs[1] * bs[2] * collision_hessian  #+ bs[1] * bs[2] * friction_hessian
+        collision_hessian_1211 = bs[1] * bs[3] * collision_hessian  #+ bs[1] * bs[3] * friction_hessian
 
         # edge2 to edge1
-        collision_hessian_ca = bs[2] * bs[0] * collision_hessian  #+ bs[2] * bs[0] * friction_hessian
-        collision_hessian_cb = bs[2] * bs[1] * collision_hessian  #+ bs[2] * bs[1] * friction_hessian
-        collision_hessian_da = bs[3] * bs[0] * collision_hessian  #+ bs[3] * bs[0] * friction_hessian
-        collision_hessian_db = bs[3] * bs[1] * collision_hessian  #+ bs[3] * bs[1] * friction_hessian
+        collision_hessian_2100 = bs[2] * bs[0] * collision_hessian  #+ bs[2] * bs[0] * friction_hessian
+        collision_hessian_2101 = bs[2] * bs[1] * collision_hessian  #+ bs[2] * bs[1] * friction_hessian
+        collision_hessian_2110 = bs[3] * bs[0] * collision_hessian  #+ bs[3] * bs[0] * friction_hessian
+        collision_hessian_2111 = bs[3] * bs[1] * collision_hessian  #+ bs[3] * bs[1] * friction_hessian
 
-        return True, collision_force_a, collision_force_b, collision_force_c, collision_force_d,\
-                    collision_hessian_aa, collision_hessian_ab, collision_hessian_ac, collision_hessian_ad, \
-                    collision_hessian_ba, collision_hessian_bb, collision_hessian_bc, collision_hessian_bd, \
-                    collision_hessian_ca, collision_hessian_cb, collision_hessian_cc, collision_hessian_cd, \
-                    collision_hessian_da, collision_hessian_db, collision_hessian_dc, collision_hessian_dd
+        return True, collision_force_10, collision_force_11, collision_hessian_10, collision_hessian_11, \
+                    collision_force_20, collision_force_21, collision_hessian_20, collision_hessian_21, \
+                    collision_hessian_101, collision_hessian_110, collision_hessian_201, collision_hessian_210, \
+                    collision_hessian_1200, collision_hessian_1201, collision_hessian_1210, collision_hessian_1211, \
+                    collision_hessian_2100, collision_hessian_2101, collision_hessian_2110, collision_hessian_2111
     else:
         collision_force = wp.vec3(0.0, 0.0, 0.0)
         collision_hessian = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
-        return False, collision_force, collision_force, collision_force, collision_force,\
-                    collision_hessian, collision_hessian, collision_hessian, collision_hessian,\
+        return False, collision_force, collision_force, collision_hessian, collision_hessian,\
+                    collision_force, collision_force, collision_hessian, collision_hessian,\
                     collision_hessian, collision_hessian,collision_hessian, collision_hessian,\
                     collision_hessian, collision_hessian,collision_hessian, collision_hessian,\
                     collision_hessian, collision_hessian,collision_hessian, collision_hessian
@@ -1761,39 +1192,54 @@ def zcy_evaluate_vertex_triangle_collision_force_hessian_4_vertices(
         collision_force = -dEdD * collision_normal
         collision_hessian = d2E_dDdD * wp.outer(collision_normal, collision_normal)
 
-        collision_force_a = collision_force * bs[0]
-        collision_force_b = collision_force * bs[1]
-        collision_force_c = collision_force * bs[2]
-        collision_force_d = collision_force * bs[3]
+        collision_force_0 = collision_force * bs[0]
+        collision_force_1 = collision_force * bs[1]
+        collision_force_2 = collision_force * bs[2]
+        collision_force_3 = collision_force * bs[3]
 
-        collision_hessian_aa = collision_hessian * bs[0] * bs[0]
-        collision_hessian_bb = collision_hessian * bs[1] * bs[1]
-        collision_hessian_cc = collision_hessian * bs[2] * bs[2]
-        collision_hessian_dd = collision_hessian * bs[3] * bs[3]
+        collision_hessian_0 = collision_hessian * bs[0] * bs[0]
+        collision_hessian_1 = collision_hessian * bs[1] * bs[1]
+        collision_hessian_2 = collision_hessian * bs[2] * bs[2]
+        collision_hessian_3 = collision_hessian * bs[3] * bs[3]
         # collision_normal_normal_sign = wp.vec4(-1.0, -1.0, -1.0, 1.0)
 
         # vertex to triangle
-        collision_hessian_ab = bs[0] * bs[1] * collision_hessian #+ bs[0] * bs[1] * friction_hessian
-        collision_hessian_ac = bs[0] * bs[2] * collision_hessian #+ bs[0] * bs[2] * friction_hessian
-        collision_hessian_ad = bs[0] * bs[3] * collision_hessian #+ bs[0] * bs[3] * friction_hessian
-        collision_hessian_ba = bs[1] * bs[0] * collision_hessian #+ bs[1] * bs[0] * friction_hessian
-        collision_hessian_bc = bs[1] * bs[2] * collision_hessian #+ bs[1] * bs[2] * friction_hessian
-        collision_hessian_bd = bs[1] * bs[3] * collision_hessian #+ bs[1] * bs[3] * friction_hessian
-        collision_hessian_ca = bs[2] * bs[0] * collision_hessian #+ bs[2] * bs[0] * friction_hessian
-        collision_hessian_cb = bs[2] * bs[1] * collision_hessian #+ bs[2] * bs[1] * friction_hessian
-        collision_hessian_cd = bs[2] * bs[3] * collision_hessian #+ bs[2] * bs[3] * friction_hessian
-        collision_hessian_da = bs[3] * bs[0] * collision_hessian #+ bs[3] * bs[0] * friction_hessian
-        collision_hessian_db = bs[3] * bs[1] * collision_hessian #+ bs[3] * bs[1] * friction_hessian
-        collision_hessian_dc = bs[3] * bs[2] * collision_hessian #+ bs[3] * bs[2] * friction_hessian
+        collision_hessian_01 = bs[0] * bs[1] * collision_hessian #+ bs[0] * bs[1] * friction_hessian
+        collision_hessian_02 = bs[0] * bs[2] * collision_hessian #+ bs[0] * bs[2] * friction_hessian
+        collision_hessian_03 = bs[0] * bs[3] * collision_hessian #+ bs[0] * bs[3] * friction_hessian
+        collision_hessian_10 = bs[1] * bs[0] * collision_hessian #+ bs[1] * bs[0] * friction_hessian
+        collision_hessian_12 = bs[1] * bs[2] * collision_hessian #+ bs[1] * bs[2] * friction_hessian
+        collision_hessian_13 = bs[1] * bs[3] * collision_hessian #+ bs[1] * bs[3] * friction_hessian
+        collision_hessian_20 = bs[2] * bs[0] * collision_hessian #+ bs[2] * bs[0] * friction_hessian
+        collision_hessian_21 = bs[2] * bs[1] * collision_hessian #+ bs[2] * bs[1] * friction_hessian
+        collision_hessian_23 = bs[2] * bs[3] * collision_hessian #+ bs[2] * bs[3] * friction_hessian
+        collision_hessian_30 = bs[3] * bs[0] * collision_hessian #+ bs[3] * bs[0] * friction_hessian
+        collision_hessian_31 = bs[3] * bs[1] * collision_hessian #+ bs[3] * bs[1] * friction_hessian
+        collision_hessian_32 = bs[3] * bs[2] * collision_hessian #+ bs[3] * bs[2] * friction_hessian
 
 
         return (
             True,
-            collision_force_a, collision_force_b, collision_force_c, collision_force_d,\
-            collision_hessian_aa, collision_hessian_ab, collision_hessian_ac, collision_hessian_ad, \
-            collision_hessian_ba, collision_hessian_bb, collision_hessian_bc, collision_hessian_bd, \
-            collision_hessian_ca, collision_hessian_cb, collision_hessian_cc, collision_hessian_cd, \
-            collision_hessian_da, collision_hessian_db, collision_hessian_dc, collision_hessian_dd
+            collision_force_0,
+            collision_force_1,
+            collision_force_2,
+            collision_force_3,
+            collision_hessian_0,
+            collision_hessian_1,
+            collision_hessian_2,
+            collision_hessian_3,
+            collision_hessian_01,
+            collision_hessian_02,
+            collision_hessian_03,
+            collision_hessian_10,
+            collision_hessian_12,
+            collision_hessian_13,
+            collision_hessian_20,
+            collision_hessian_21,
+            collision_hessian_23,
+            collision_hessian_30,
+            collision_hessian_31,
+            collision_hessian_32,
         )
     else:
         collision_force = wp.vec3(0.0, 0.0, 0.0)
@@ -2607,8 +2053,6 @@ def zcy_truncation_by_conservative_bounds(
 def zcy_VBD_accumulate_contact_force_and_hessian(
     # inputs
     pos: wp.array(dtype=wp.vec3),
-    temp_mem1: wp.array(dtype=float),
-    temp_mem2: wp.array(dtype=float),
     tri_indices: wp.array(dtype=wp.int32, ndim=2),
     edge_indices: wp.array(dtype=wp.int32, ndim=2),
     # self contact
@@ -2648,12 +2092,13 @@ def zcy_VBD_accumulate_contact_force_and_hessian(
             e2_v1 = edge_indices[e2_idx, 2]
             e2_v2 = edge_indices[e2_idx, 3]
 
-            (has_contact, collision_force_a, collision_force_b, collision_force_c, collision_force_d,
-                    collision_hessian_aa, collision_hessian_ab, collision_hessian_ac, collision_hessian_ad, 
-                    collision_hessian_ba, collision_hessian_bb, collision_hessian_bc, collision_hessian_bd, 
-                    collision_hessian_ca, collision_hessian_cb, collision_hessian_cc, collision_hessian_cd, 
-                    collision_hessian_da, collision_hessian_db, collision_hessian_dc, collision_hessian_dd
-            ) =  zcy_evaluate_edge_edge_contact_2_vertices(
+            has_contact, collision_force_10, collision_force_11, collision_hessian_10, collision_hessian_11, \
+                collision_force_20, collision_force_21, collision_hessian_20, collision_hessian_21, \
+                collision_hessian_101, collision_hessian_110, collision_hessian_201, collision_hessian_210, \
+                collision_hessian_1200, collision_hessian_1201, collision_hessian_1210, collision_hessian_1211, \
+                collision_hessian_2100, collision_hessian_2101, collision_hessian_2110, collision_hessian_2111 = \
+            (
+                zcy_evaluate_edge_edge_contact_2_vertices(
                     e1_idx,
                     e2_idx,
                     pos,
@@ -2665,24 +2110,7 @@ def zcy_VBD_accumulate_contact_force_and_hessian(
                     friction_epsilon,
                     edge_edge_parallel_epsilon,
                 )
-
-            # 1. 左边用括号包裹，允许换行
-            (
-                collision_hessian_aa, collision_hessian_ab, collision_hessian_ac, collision_hessian_ad,
-                collision_hessian_ba, collision_hessian_bb, collision_hessian_bc, collision_hessian_bd,
-                collision_hessian_ca, collision_hessian_cb, collision_hessian_cc, collision_hessian_cd,
-                collision_hessian_da, collision_hessian_db, collision_hessian_dc, collision_hessian_dd
-            ) = filter_hessian_12x12_device(
-                # 2. 函数参数也按 4x4 排列
-                collision_hessian_aa, collision_hessian_ab, collision_hessian_ac, collision_hessian_ad, 
-                collision_hessian_ba, collision_hessian_bb, collision_hessian_bc, collision_hessian_bd, 
-                collision_hessian_ca, collision_hessian_cb, collision_hessian_cc, collision_hessian_cd, 
-                collision_hessian_da, collision_hessian_db, collision_hessian_dc, collision_hessian_dd,
-                # 3. 额外参数单独一行
-                temp_mem1, 
-                t_id
             )
-
 
             #加两遍，除2
             if has_contact:
@@ -2690,13 +2118,13 @@ def zcy_VBD_accumulate_contact_force_and_hessian(
                 #          has_contact, e1_idx, e2_idx, e1_v1, e1_v2, e2_v1, e2_v2)
                 # edge1
                 # force
-                wp.atomic_add(edge_contact_forces, e1_v1, collision_force_a*0.5 )
-                wp.atomic_add(edge_contact_forces, e1_v2, collision_force_b*0.5 )
+                wp.atomic_add(edge_contact_forces, e1_v1, collision_force_10*0.5 )
+                wp.atomic_add(edge_contact_forces, e1_v2, collision_force_11*0.5 )
 
                 # edge2
                 # force
-                wp.atomic_add(edge_contact_forces, e2_v1, collision_force_c*0.5 )
-                wp.atomic_add(edge_contact_forces, e2_v2, collision_force_d*0.5 )
+                wp.atomic_add(edge_contact_forces, e2_v1, collision_force_20*0.5 )
+                wp.atomic_add(edge_contact_forces, e2_v2, collision_force_21*0.5 )
 
                 # 假设每个 contact 预分配 16 个条目
                 # contact_base: 每个 contact 的起始索引
@@ -2707,70 +2135,70 @@ def zcy_VBD_accumulate_contact_force_and_hessian(
                 # (e1_v1, e1_v1)
                 edge_contact_hessian_rows[contact_base + 0] = e1_v1
                 edge_contact_hessian_cols[contact_base + 0] = e1_v1
-                edge_contact_hessian_values[contact_base + 0] = collision_hessian_aa*0.5
+                edge_contact_hessian_values[contact_base + 0] = collision_hessian_10*0.5
                 # (e1_v1, e1_v2)
                 edge_contact_hessian_rows[contact_base + 1] = e1_v1
                 edge_contact_hessian_cols[contact_base + 1] = e1_v2
-                edge_contact_hessian_values[contact_base + 1] = collision_hessian_ab*0.5
+                edge_contact_hessian_values[contact_base + 1] = collision_hessian_101*0.5
                 # (e1_v2, e1_v1)
                 edge_contact_hessian_rows[contact_base + 2] = e1_v2
                 edge_contact_hessian_cols[contact_base + 2] = e1_v1
-                edge_contact_hessian_values[contact_base + 2] = collision_hessian_ba*0.5
+                edge_contact_hessian_values[contact_base + 2] = collision_hessian_110*0.5
                 # (e1_v2, e1_v2)
                 edge_contact_hessian_rows[contact_base + 3] = e1_v2
                 edge_contact_hessian_cols[contact_base + 3] = e1_v2
-                edge_contact_hessian_values[contact_base + 3] = collision_hessian_bb*0.5
+                edge_contact_hessian_values[contact_base + 3] = collision_hessian_11*0.5
 
                 # --- edge2 ---
                 edge_contact_hessian_rows[contact_base + 4] = e2_v1
                 edge_contact_hessian_cols[contact_base + 4] = e2_v1
-                edge_contact_hessian_values[contact_base + 4] = collision_hessian_cc*0.5
+                edge_contact_hessian_values[contact_base + 4] = collision_hessian_20*0.5
 
                 edge_contact_hessian_rows[contact_base + 5] = e2_v1
                 edge_contact_hessian_cols[contact_base + 5] = e2_v2
-                edge_contact_hessian_values[contact_base + 5] = collision_hessian_cd*0.5
+                edge_contact_hessian_values[contact_base + 5] = collision_hessian_201*0.5
 
                 edge_contact_hessian_rows[contact_base + 6] = e2_v2
                 edge_contact_hessian_cols[contact_base + 6] = e2_v1
-                edge_contact_hessian_values[contact_base + 6] = collision_hessian_dc*0.5
+                edge_contact_hessian_values[contact_base + 6] = collision_hessian_210*0.5
 
                 edge_contact_hessian_rows[contact_base + 7] = e2_v2
                 edge_contact_hessian_cols[contact_base + 7] = e2_v2
-                edge_contact_hessian_values[contact_base + 7] = collision_hessian_dd*0.5
+                edge_contact_hessian_values[contact_base + 7] = collision_hessian_21*0.5
 
                 # --- edge1 <-> edge2 cross blocks ---
                 edge_contact_hessian_rows[contact_base + 8] = e1_v1
                 edge_contact_hessian_cols[contact_base + 8] = e2_v1
-                edge_contact_hessian_values[contact_base + 8] = collision_hessian_ac*0.5
+                edge_contact_hessian_values[contact_base + 8] = collision_hessian_1200*0.5
 
                 edge_contact_hessian_rows[contact_base + 9] = e1_v1
                 edge_contact_hessian_cols[contact_base + 9] = e2_v2
-                edge_contact_hessian_values[contact_base + 9] = collision_hessian_ad*0.5
+                edge_contact_hessian_values[contact_base + 9] = collision_hessian_1201*0.5
 
                 edge_contact_hessian_rows[contact_base + 10] = e1_v2
                 edge_contact_hessian_cols[contact_base + 10] = e2_v1
-                edge_contact_hessian_values[contact_base + 10] = collision_hessian_bc*0.5
+                edge_contact_hessian_values[contact_base + 10] = collision_hessian_1210*0.5
 
                 edge_contact_hessian_rows[contact_base + 11] = e1_v2
                 edge_contact_hessian_cols[contact_base + 11] = e2_v2
-                edge_contact_hessian_values[contact_base + 11] = collision_hessian_bd*0.5
+                edge_contact_hessian_values[contact_base + 11] = collision_hessian_1211*0.5
 
                 # --- edge2 <-> edge1 cross blocks ---
                 edge_contact_hessian_rows[contact_base + 12] = e2_v1
                 edge_contact_hessian_cols[contact_base + 12] = e1_v1
-                edge_contact_hessian_values[contact_base + 12] = collision_hessian_ca*0.5
+                edge_contact_hessian_values[contact_base + 12] = collision_hessian_2100*0.5
 
                 edge_contact_hessian_rows[contact_base + 13] = e2_v1
                 edge_contact_hessian_cols[contact_base + 13] = e1_v2
-                edge_contact_hessian_values[contact_base + 13] = collision_hessian_cb*0.5
+                edge_contact_hessian_values[contact_base + 13] = collision_hessian_2101*0.5
 
                 edge_contact_hessian_rows[contact_base + 14] = e2_v2
                 edge_contact_hessian_cols[contact_base + 14] = e1_v1
-                edge_contact_hessian_values[contact_base + 14] = collision_hessian_da*0.5
+                edge_contact_hessian_values[contact_base + 14] = collision_hessian_2110*0.5
 
                 edge_contact_hessian_rows[contact_base + 15] = e2_v2
                 edge_contact_hessian_cols[contact_base + 15] = e1_v2
-                edge_contact_hessian_values[contact_base + 15] = collision_hessian_db*0.5
+                edge_contact_hessian_values[contact_base + 15] = collision_hessian_2111*0.5
 
 
     # process vertex-triangle collisions
@@ -2784,12 +2212,28 @@ def zcy_VBD_accumulate_contact_force_and_hessian(
             tri_a = tri_indices[tri_idx, 0]
             tri_b = tri_indices[tri_idx, 1]
             tri_c = tri_indices[tri_idx, 2]
-
-            (has_contact, collision_force_a, collision_force_b, collision_force_c, collision_force_d,
-                    collision_hessian_aa, collision_hessian_ab, collision_hessian_ac, collision_hessian_ad, 
-                    collision_hessian_ba, collision_hessian_bb, collision_hessian_bc, collision_hessian_bd, 
-                    collision_hessian_ca, collision_hessian_cb, collision_hessian_cc, collision_hessian_cd, 
-                    collision_hessian_da, collision_hessian_db, collision_hessian_dc, collision_hessian_dd
+            (
+                has_contact,
+                collision_force_0,
+                collision_force_1,
+                collision_force_2,
+                collision_force_3,
+                collision_hessian_0,
+                collision_hessian_1,
+                collision_hessian_2,
+                collision_hessian_3,
+                collision_hessian_01,
+                collision_hessian_02,
+                collision_hessian_03,
+                collision_hessian_10,
+                collision_hessian_12,
+                collision_hessian_13,
+                collision_hessian_20,
+                collision_hessian_21,
+                collision_hessian_23,
+                collision_hessian_30,
+                collision_hessian_31,
+                collision_hessian_32,
             ) = zcy_evaluate_vertex_triangle_collision_force_hessian_4_vertices(
                 particle_idx,
                 tri_idx,
@@ -2801,24 +2245,6 @@ def zcy_VBD_accumulate_contact_force_and_hessian(
                 friction_mu,
                 friction_epsilon,
             )
-
-            # 1. 左边用括号包裹，允许换行
-            (
-                collision_hessian_aa, collision_hessian_ab, collision_hessian_ac, collision_hessian_ad,
-                collision_hessian_ba, collision_hessian_bb, collision_hessian_bc, collision_hessian_bd,
-                collision_hessian_ca, collision_hessian_cb, collision_hessian_cc, collision_hessian_cd,
-                collision_hessian_da, collision_hessian_db, collision_hessian_dc, collision_hessian_dd
-            ) = filter_hessian_12x12_device(
-                # 2. 函数参数也按 4x4 排列
-                collision_hessian_aa, collision_hessian_ab, collision_hessian_ac, collision_hessian_ad, 
-                collision_hessian_ba, collision_hessian_bb, collision_hessian_bc, collision_hessian_bd, 
-                collision_hessian_ca, collision_hessian_cb, collision_hessian_cc, collision_hessian_cd, 
-                collision_hessian_da, collision_hessian_db, collision_hessian_dc, collision_hessian_dd,
-                # 3. 额外参数单独一行
-                temp_mem2, 
-                t_id
-            )
-
             if has_contact:
                 #wp.printf("has_contact: %d, p_idx: %d, t_idx: %d, t_a: %d, t_b: %d, t_c: %d\n", 
                 #          has_contact, particle_idx, tri_idx, tri_a, tri_b, tri_c)
@@ -2827,91 +2253,90 @@ def zcy_VBD_accumulate_contact_force_and_hessian(
                 contact_base = contact_index * 16  # 每个 particle-tri contact 占16个条目
 
                 # --- 力累加 ---
-                wp.atomic_add(vt_contact_forces, particle_idx, collision_force_d)
-                wp.atomic_add(vt_contact_forces, tri_a, collision_force_a)
-                wp.atomic_add(vt_contact_forces, tri_b, collision_force_b)
-                wp.atomic_add(vt_contact_forces, tri_c, collision_force_c)
+                wp.atomic_add(vt_contact_forces, particle_idx, collision_force_3)
+                wp.atomic_add(vt_contact_forces, tri_a, collision_force_0)
+                wp.atomic_add(vt_contact_forces, tri_b, collision_force_1)
+                wp.atomic_add(vt_contact_forces, tri_c, collision_force_2)
 
                 # --- 对角块 ---
                 # particle
                 vt_contact_hessian_rows[contact_base + 0] = particle_idx
                 vt_contact_hessian_cols[contact_base + 0] = particle_idx
-                vt_contact_hessian_values[contact_base + 0] = collision_hessian_dd
+                vt_contact_hessian_values[contact_base + 0] = collision_hessian_3
 
                 # tri_a
                 vt_contact_hessian_rows[contact_base + 1] = tri_a
                 vt_contact_hessian_cols[contact_base + 1] = tri_a
-                vt_contact_hessian_values[contact_base + 1] = collision_hessian_aa
+                vt_contact_hessian_values[contact_base + 1] = collision_hessian_0
 
                 # tri_b
                 vt_contact_hessian_rows[contact_base + 2] = tri_b
                 vt_contact_hessian_cols[contact_base + 2] = tri_b
-                vt_contact_hessian_values[contact_base + 2] = collision_hessian_bb
+                vt_contact_hessian_values[contact_base + 2] = collision_hessian_1
 
                 # tri_c
                 vt_contact_hessian_rows[contact_base + 3] = tri_c
                 vt_contact_hessian_cols[contact_base + 3] = tri_c
-                vt_contact_hessian_values[contact_base + 3] = collision_hessian_cc
+                vt_contact_hessian_values[contact_base + 3] = collision_hessian_2
 
                 # --- cross blocks ---
                 # a0
                 vt_contact_hessian_rows[contact_base + 4] = tri_a
                 vt_contact_hessian_cols[contact_base + 4] = tri_b
-                vt_contact_hessian_values[contact_base + 4] = collision_hessian_ab
+                vt_contact_hessian_values[contact_base + 4] = collision_hessian_01
 
                 vt_contact_hessian_rows[contact_base + 5] = tri_a
                 vt_contact_hessian_cols[contact_base + 5] = tri_c
-                vt_contact_hessian_values[contact_base + 5] = collision_hessian_ac
+                vt_contact_hessian_values[contact_base + 5] = collision_hessian_02
 
                 vt_contact_hessian_rows[contact_base + 6] = tri_a
                 vt_contact_hessian_cols[contact_base + 6] = particle_idx
-                vt_contact_hessian_values[contact_base + 6] = collision_hessian_ad
+                vt_contact_hessian_values[contact_base + 6] = collision_hessian_03
 
                 # b1
                 vt_contact_hessian_rows[contact_base + 7] = tri_b
                 vt_contact_hessian_cols[contact_base + 7] = tri_a
-                vt_contact_hessian_values[contact_base + 7] = collision_hessian_ba
+                vt_contact_hessian_values[contact_base + 7] = collision_hessian_10
 
                 vt_contact_hessian_rows[contact_base + 8] = tri_b
                 vt_contact_hessian_cols[contact_base + 8] = tri_c
-                vt_contact_hessian_values[contact_base + 8] = collision_hessian_bc
+                vt_contact_hessian_values[contact_base + 8] = collision_hessian_12
 
                 vt_contact_hessian_rows[contact_base + 9] = tri_b
                 vt_contact_hessian_cols[contact_base + 9] = particle_idx
-                vt_contact_hessian_values[contact_base + 9] = collision_hessian_bd
+                vt_contact_hessian_values[contact_base + 9] = collision_hessian_13
 
                 # c2
                 vt_contact_hessian_rows[contact_base + 10] = tri_c
                 vt_contact_hessian_cols[contact_base + 10] = tri_a
-                vt_contact_hessian_values[contact_base + 10] = collision_hessian_ca
+                vt_contact_hessian_values[contact_base + 10] = collision_hessian_20
 
                 vt_contact_hessian_rows[contact_base + 11] = tri_c
                 vt_contact_hessian_cols[contact_base + 11] = tri_b
-                vt_contact_hessian_values[contact_base + 11] = collision_hessian_cb
+                vt_contact_hessian_values[contact_base + 11] = collision_hessian_21
 
                 vt_contact_hessian_rows[contact_base + 12] = tri_c
                 vt_contact_hessian_cols[contact_base + 12] = particle_idx
-                vt_contact_hessian_values[contact_base + 12] = collision_hessian_cd
+                vt_contact_hessian_values[contact_base + 12] = collision_hessian_23
 
                 # p3
                 vt_contact_hessian_rows[contact_base + 13] = particle_idx
                 vt_contact_hessian_cols[contact_base + 13] = tri_a
-                vt_contact_hessian_values[contact_base + 13] = collision_hessian_da
+                vt_contact_hessian_values[contact_base + 13] = collision_hessian_30
 
                 vt_contact_hessian_rows[contact_base + 14] = particle_idx
                 vt_contact_hessian_cols[contact_base + 14] = tri_b
-                vt_contact_hessian_values[contact_base + 14] = collision_hessian_db
+                vt_contact_hessian_values[contact_base + 14] = collision_hessian_31
 
                 vt_contact_hessian_rows[contact_base + 15] = particle_idx
                 vt_contact_hessian_cols[contact_base + 15] = tri_c
-                vt_contact_hessian_values[contact_base + 15] = collision_hessian_dc
+                vt_contact_hessian_values[contact_base + 15] = collision_hessian_32
 
 
 @wp.kernel
 def zcy_accumulate_spring_force_and_hessian(
     # inputs
     pos: wp.array(dtype=wp.vec3),
-    temp_mem: wp.array(dtype=float),
     # spring constraints
     spring_indices: wp.array(dtype=int),
     spring_rest_length: wp.array(dtype=float),
@@ -2934,11 +2359,6 @@ def zcy_accumulate_spring_force_and_hessian(
         spring_rest_length[spring_index],
         spring_stiffness[spring_index],
     )
-    H_aa, H_ab, H_ba, H_bb = filter_hessian_6x6_device(
-        H, -H,
-        -H, H,
-        temp_mem, spring_index
-    )
 
     # --- 累加到端点 ---
     # i: 受到 +f_ij 力
@@ -2953,22 +2373,22 @@ def zcy_accumulate_spring_force_and_hessian(
     # (i,i): +H
     spring_hessian_rows[base + 0] = i
     spring_hessian_cols[base + 0] = i
-    spring_hessian_values[base + 0] = H_aa
+    spring_hessian_values[base + 0] = H
 
     # (i,j): -H
     spring_hessian_rows[base + 1] = i
     spring_hessian_cols[base + 1] = j
-    spring_hessian_values[base + 1] = H_ab
+    spring_hessian_values[base + 1] = -H
 
     # (j,i): -H
     spring_hessian_rows[base + 2] = j
     spring_hessian_cols[base + 2] = i
-    spring_hessian_values[base + 2] = H_ba
+    spring_hessian_values[base + 2] = -H
 
     # (j,j): +H
     spring_hessian_rows[base + 3] = j
     spring_hessian_cols[base + 3] = j
-    spring_hessian_values[base + 3] = H_bb
+    spring_hessian_values[base + 3] = H
 
 @wp.kernel
 def zcy_assemble_inertia_and_gravity_add_force(
@@ -3481,7 +2901,6 @@ def build_bsr_from_block_coo(blocks_data: np.ndarray,
 def zcy_accumulate_stvk_force_and_hessian(
     # inputs
     pos: wp.array(dtype=wp.vec3),
-    temp_mem: wp.array(dtype=float),
     # stvk force and hessian
     tri_indices: wp.array(dtype=wp.int32, ndim=2),
     tri_poses: wp.array(dtype=wp.mat22),
@@ -3509,17 +2928,6 @@ def zcy_accumulate_stvk_force_and_hessian(
         tri_areas[tri_index],
         tri_materials[tri_index, 0],
         tri_materials[tri_index, 1],
-    )
-
-    (
-        h_aa, h_ab, h_ac, 
-        h_ba, h_bb, h_bc, 
-        h_ca, h_cb, h_cc
-    ) = filter_hessian_9x9_device(
-        h_aa, h_ab, h_ac, 
-        h_ba, h_bb, h_bc, 
-        h_ca, h_cb, h_cc,
-        temp_mem, tri_index
     )
 
     # --- 累加到端点 ---
@@ -3579,7 +2987,6 @@ def zcy_accumulate_stvk_force_and_hessian(
 @wp.kernel
 def zcy_accumulate_bending_force_and_hessian(
     pos: wp.array(dtype=wp.vec3),
-    temp_mem: wp.array(dtype=float),
     edge_indices: wp.array(dtype=wp.int32, ndim=2),
     edge_rest_angle: wp.array(dtype=float),
     edge_rest_length: wp.array(dtype=float),
@@ -3612,15 +3019,6 @@ def zcy_accumulate_bending_force_and_hessian(
         edge_rest_length,
         ke,
     )
-    # 
-    (
-        h00, h01, h02, h03, h10, h11, h12, h13, h20, h21, h22, h23, h30, h31, h32, h33
-    ) = filter_hessian_12x12_device(
-        h00, h01, h02, h03, h10, h11, h12, h13, h20, h21, h22, h23, h30, h31, h32, h33,
-        temp_mem, 
-        edge_index
-    )
-    
 
     # 原子累加到四个顶点
     wp.atomic_add(bending_forces, i, f0)
@@ -4432,13 +3830,6 @@ class zcy_SolverVBD(SolverBase):
         self.vt_contact_hessian_rows.zero_()
         self.vt_contact_hessian_cols.zero_()
 
-        # eigen filtering
-        # 288 = 144 (矩阵) + 144 (特征向量)
-        temp_mem1_size = self.num_ee_contact * 288
-        temp_mem2_size = self.num_vt_contact * 288
-        temp_buffer1 = wp.zeros(temp_mem1_size, dtype=float, device=self.device)
-        temp_buffer2 = wp.zeros(temp_mem2_size, dtype=float, device=self.device)
-
         # dim
         wp.launch(
             kernel=zcy_VBD_accumulate_contact_force_and_hessian,
@@ -4446,8 +3837,6 @@ class zcy_SolverVBD(SolverBase):
             dim=self.num_contact,
             inputs=[
                 pos_warp,
-                temp_buffer1,
-                temp_buffer2,
                 self.model.tri_indices,
                 self.model.edge_indices,
                 # self-contact
@@ -4506,16 +3895,10 @@ class zcy_SolverVBD(SolverBase):
 
         # dim
         if self.spring :
-            # eigen filtering
-            # 72 = 36 (矩阵) + 36 (特征向量)
-            temp_mem_size = self.num_spring * 72
-            temp_buffer = wp.zeros(temp_mem_size, dtype=float, device=self.device)
-
             wp.launch(
                 kernel=zcy_accumulate_spring_force_and_hessian,
                 inputs=[
                     pos_warp,
-                    temp_buffer,
                     # spring constraints
                     self.spring_indices,
                     self.spring_rest_length,
@@ -4530,16 +3913,10 @@ class zcy_SolverVBD(SolverBase):
                 device=self.device,
             )
         else :
-            # eigen filtering
-            # 162 = 81 (矩阵) + 81 (特征向量)
-            temp_mem_size = self.num_triangles * 162
-            temp_buffer = wp.zeros(temp_mem_size, dtype=float, device=self.device)
-
             wp.launch(
                 kernel=zcy_accumulate_stvk_force_and_hessian,
                 inputs=[
                     pos_warp,
-                    temp_buffer,
                     # stvk force and hessian
                     self.model.tri_indices,
                     self.model.tri_poses,
@@ -4571,17 +3948,11 @@ class zcy_SolverVBD(SolverBase):
         self.bending_hessian_rows.zero_()
         self.bending_hessian_cols.zero_()
 
-        # eigen filtering
-        # 288 = 144 (矩阵) + 144 (特征向量)
-        temp_mem_size = self.num_spring * 288
-        temp_buffer = wp.zeros(temp_mem_size, dtype=float, device=self.device)
-
         # dim             
         wp.launch(
             kernel=zcy_accumulate_bending_force_and_hessian,
             inputs=[
                 pos_warp,
-                temp_buffer,
                 # bending force and hessian
                 self.model.edge_indices,
                 self.model.edge_rest_angle,
