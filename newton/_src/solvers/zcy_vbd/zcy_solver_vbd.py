@@ -1382,10 +1382,13 @@ def filter_hessian_12x12_device(
 def zcy_evaluate_dihedral_angle_based_bending_force_hessian(
     bending_index: int,
     pos: wp.array(dtype=wp.vec3),
+    pos_prev: wp.array(dtype=wp.vec3),  # [新增] 需要上一帧位置算速度
     edge_indices: wp.array(dtype=wp.int32, ndim=2),
     edge_rest_angle: wp.array(dtype=float),
     edge_rest_length: wp.array(dtype=float),
     stiffness: float,
+    damping: float,   # [新增] 阻尼系数 (通常是一个小的比率，如 0.01~0.1)
+    dt: float         # [新增] 时间步长
 ):
     eps = 1.0e-6
 
@@ -1426,10 +1429,14 @@ def zcy_evaluate_dihedral_angle_based_bending_force_hessian(
     cos_theta = wp.dot(n1_hat, n2_hat)
     theta = wp.atan2(sin_theta, cos_theta)
 
+    # 基础刚度 k
     k = stiffness * edge_rest_length[bending_index]
+    
+    # 弹性力的标量部分: k * (theta - theta_0)
+    # 我们稍后会把阻尼加到这个变量里，这样后面计算 f0...f3 的代码不用变
     dE_dtheta = k * (theta - edge_rest_angle[bending_index])
 
-    # Pre-compute skew matrices (shared across all angle derivative computations)
+    # Pre-compute skew matrices 
     skew_e = wp.skew(e)
     skew_x03 = wp.skew(x03)
     skew_x02 = wp.skew(x02)
@@ -1438,13 +1445,12 @@ def zcy_evaluate_dihedral_angle_based_bending_force_hessian(
     skew_n1 = wp.skew(n1_hat)
     skew_n2 = wp.skew(n2_hat)
 
-    # Compute the derivatives of unit normals with respect to each vertex; required for computing angle derivatives
+    # Compute derivatives (省略中间未变代码，与原函数一致...)
     I3 = wp.identity(n=3, dtype=float)
     Pn1 = I3 - wp.outer(n1_hat, n1_hat)
     Pn2 = I3 - wp.outer(n2_hat, n2_hat)
     Pe = I3 - wp.outer(e_hat, e_hat)
 
-    # \hat n_1、\hat n_2 的单位化导数：U(v)=(I-\hat v\hat v^T)/||v|| 乘以未单位化的导数
     dn1hat_dx0 = (1.0 / n1_norm) * Pn1 * (-skew_x03 - skew_x02)
     dn2hat_dx0 = wp.mat33(0.0)
 
@@ -1462,7 +1468,6 @@ def zcy_evaluate_dihedral_angle_based_bending_force_hessian(
     dehat_dx2 = (1.0 / e_norm) * Pe * (-I3)
     dehat_dx3 = (1.0 / e_norm) * Pe * (I3)
 
-    # atan2 链式法则所需量：s=sinθ, c=cosθ, denom=s^2+c^2
     c = cos_theta
     s = sin_theta
     denom = s * s + c * c
@@ -1489,19 +1494,51 @@ def zcy_evaluate_dihedral_angle_based_bending_force_hessian(
     dc_dx3 = wp.transpose(dn1hat_dx3) * n2_hat + wp.transpose(dn2hat_dx3) * n1_hat
     dtheta_dx3 = (c * ds_dx3 - s * dc_dx3) * (1.0 / denom)
 
-    # 四顶点的角度梯度向量
+    # 四顶点的角度梯度向量 (g)
     g0 = dtheta_dx0
     g1 = dtheta_dx1
     g2 = dtheta_dx2
     g3 = dtheta_dx3
+    
+    # ----------------------------------------------
+    # [Damping 处理核心部分]
+    # ----------------------------------------------
+    if damping > 0.0:
+        inv_dt = 1.0 / dt
+        
+        # 1. 计算四个点的速度 v = (x - x_prev) / dt
+        # 你的参考代码里直接用了 dx，但我这里为了物理单位统一，还原为速度
+        v0 = (x0 - pos_prev[vi0]) * inv_dt
+        v1 = (x1 - pos_prev[vi1]) * inv_dt
+        v2 = (x2 - pos_prev[vi2]) * inv_dt
+        v3 = (x3 - pos_prev[vi3]) * inv_dt
+        
+        # 2. 计算角度随时间的变化率 dtheta / dt
+        # Chain rule: dtheta/dt = sum( dtheta/dx_i * v_i )
+        dtheta_dt = wp.dot(g0, v0) + wp.dot(g1, v1) + wp.dot(g2, v2) + wp.dot(g3, v3)
+        
+        # 3. 计算阻尼力标量
+        # Force_damping = - (damping * k) * dtheta_dt * Gradient
+        # 我们把标量部分加到 dE_dtheta 上，下面计算 force 的代码会自动带上阻尼
+        dE_dtheta += (damping * k) * dtheta_dt
+        
+        # 4. 修改 Hessian 系数
+        # 原始: k
+        # 阻尼: k * damping / dt
+        # 合并: k * (1 + damping/dt)
+        k = k * (1.0 + damping * inv_dt)
 
-    # 四个力：f_i = -dE/dθ * g_i
+    # ----------------------------------------------
+    # 下面的代码完全不用变，因为我们已经修改了 dE_dtheta 和 k
+    # ----------------------------------------------
+
+    # 四个力：f_i = -Total_Scalar * g_i
     f0 = -dE_dtheta * g0
     f1 = -dE_dtheta * g1
     f2 = -dE_dtheta * g2
     f3 = -dE_dtheta * g3
 
-    # 16 个 Hessian 块：H_ij = k * g_i g_j^T（Gauss–Newton 外积）
+    # 16 个 Hessian 块：H_ij = Total_K * g_i g_j^T
     h00 = k * wp.outer(g0, g0)
     h01 = k * wp.outer(g0, g1)
     h02 = k * wp.outer(g0, g2)
@@ -1528,14 +1565,17 @@ def zcy_evaluate_dihedral_angle_based_bending_force_hessian(
 def zcy_evaluate_stvk_force_hessian(
     face: int,
     pos: wp.array(dtype=wp.vec3),
+    pos_prev: wp.array(dtype=wp.vec3), # [新增] 用于计算速度
     tri_indices: wp.array(dtype=wp.int32, ndim=2),
     tri_pose: wp.mat22,
     area: float,
     mu: float,
     lmbd: float,
+    kd: float,      # [新增] 刚度阻尼系数 (Rayleigh Damping coeff)
+    dt: float,      # [新增] 时间步长
 ):
-    # StVK energy：输出3个force与9个Hessian块（保持原参数签名，不引入包装）
-
+    # --- 1) ~ 6) 保持原有的 StVK 弹性力与 Hessian 计算逻辑不变 ---
+    
     # 1) 组装 F 的两列
     v0 = tri_indices[face, 0]
     v1 = tri_indices[face, 1]
@@ -1563,6 +1603,8 @@ def zcy_evaluate_stvk_force_hessian(
     G01 = 0.5 * f0f1
 
     G_norm_sq = G00 * G00 + G11 * G11 + 2.0 * G01 * G01
+    
+    # [提前返回检查]
     if G_norm_sq < 1.0e-20:
         z = wp.vec3(0.0, 0.0, 0.0)
         Z = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
@@ -1575,7 +1617,7 @@ def zcy_evaluate_stvk_force_hessian(
     PK1_col0 = f0 * (two_mu * G00 + lt) + f1 * (two_mu * G01)
     PK1_col1 = f0 * (two_mu * G01) + f1 * (two_mu * G11 + lt)
 
-    # 4) f 空间 Hessian 块 A00/A01/A11
+    # 4) f 空间 Hessian 块
     Ic = f0f0 + f1f1
     c = -mu + (0.5 * Ic - 1.0) * lmbd
     I3 = wp.identity(n=3, dtype=float)
@@ -1597,12 +1639,12 @@ def zcy_evaluate_stvk_force_hessian(
     b01 = DmInv01
     b02 = DmInv11
 
-    # 6) 三个顶点力（忽略 v_order，直接全输出）
+    # 6) 三个弹性力 f_elastic
     f_a0 = -(PK1_col0 * a00 + PK1_col1 * b00) * area
     f_a1 = -(PK1_col0 * a01 + PK1_col1 * b01) * area
     f_a2 = -(PK1_col0 * a02 + PK1_col1 * b02) * area
 
-    # 7) 九个海森块（Hab 公式）
+    # 7) 九个弹性海森块 K_elastic (H00...H22)
     A01T = wp.transpose(A01)
 
     H00 = (a00 * a00) * A00 + (b00 * b00) * A11 + (a00 * b00) * A01 + (b00 * a00) * A01T
@@ -1617,10 +1659,49 @@ def zcy_evaluate_stvk_force_hessian(
     H21 = (a02 * a01) * A00 + (b02 * b01) * A11 + (a02 * b01) * A01 + (b02 * a01) * A01T
     H22 = (a02 * a02) * A00 + (b02 * b02) * A11 + (a02 * b02) * A01 + (b02 * a02) * A01T
 
-    # 面积缩放（力已乘 area；海森也乘 area）
+    # 面积缩放 Hessian (得到真实的 Stiffness Matrix K)
     H00 *= area; H01 *= area; H02 *= area
     H10 *= area; H11 *= area; H12 *= area
     H20 *= area; H21 *= area; H22 *= area
+
+    # --- [新增逻辑] 添加 Rayleigh Damping ---
+    
+    # A. 计算阻尼力 (Damping Force)
+    # 物理公式: f_damp = -kd * (K * v)
+    if kd > 0.0:
+        inv_dt = 1.0 / dt
+        
+        # 1. 计算三个顶点的速度
+        vel0 = (pos[v0] - pos_prev[v0]) * inv_dt
+        vel1 = (pos[v1] - pos_prev[v1]) * inv_dt
+        vel2 = (pos[v2] - pos_prev[v2]) * inv_dt
+
+        # 2. 计算 K * v (利用刚度矩阵与速度的乘积)
+        # 注意：这里利用了你刚才问到的公式 [Haa*va + Hab*vb + Hac*vc]
+        # 这样能自动处理非对角线耦合
+        kv0 = H00 * vel0 + H01 * vel1 + H02 * vel2
+        kv1 = H10 * vel0 + H11 * vel1 + H12 * vel2
+        kv2 = H20 * vel0 + H21 * vel1 + H22 * vel2
+
+        # 3. 将阻尼力叠加到总力上
+        f_a0 += -kd * kv0
+        f_a1 += -kd * kv1
+        f_a2 += -kd * kv2
+
+        # B. 计算阻尼 Hessian (Damping Hessian)
+        # 物理公式: H_total = K_elastic + (kd/dt) * K_elastic
+        # 系数 scale = 1.0 + kd/dt
+        hessian_scale = 1.0 + kd * inv_dt
+        
+        H00 *= hessian_scale
+        H01 *= hessian_scale
+        H02 *= hessian_scale
+        H10 *= hessian_scale
+        H11 *= hessian_scale
+        H12 *= hessian_scale
+        H20 *= hessian_scale
+        H21 *= hessian_scale
+        H22 *= hessian_scale
 
     return f_a0, f_a1, f_a2, H00, H01, H02, H10, H11, H12, H20, H21, H22
 
@@ -1629,6 +1710,8 @@ def zcy_evaluate_edge_edge_contact_2_vertices(
     e1: int,
     e2: int,
     pos: wp.array(dtype=wp.vec3),
+    pos_prev: wp.array(dtype=wp.vec3),  # [新增] 用于计算速度
+    dt: float,                          # [新增] 时间步长
     edge_indices: wp.array(dtype=wp.int32, ndim=2),
     collision_radius: float,
     collision_stiffness: float,
@@ -1638,17 +1721,7 @@ def zcy_evaluate_edge_edge_contact_2_vertices(
     edge_edge_parallel_epsilon: float,
 ):
     r"""
-    Returns the edge-edge contact force and hessian, including the friction force.
-    Args:
-        v:
-        v_order: \in {0, 1, 2, 3}, 0, 1 is vertex 0, 1 of e1, 2,3 is vertex 0, 1 of e2
-        e0
-        e1
-        pos
-        edge_indices
-        collision_radius
-        collision_stiffness
-        dt
+    Returns the edge-edge contact force and hessian with Rayleigh Damping.
     """
     e1_v1 = edge_indices[e1, 2]
     e1_v2 = edge_indices[e1, 3]
@@ -1672,25 +1745,70 @@ def zcy_evaluate_edge_edge_contact_2_vertices(
 
     diff = c1 - c2
     dis = st[2]
+    
+    # 注意：collision_normal 指向 e1 -> e2 还是 e2 -> e1 取决于 diff 的方向
+    # 这里 diff = c1 - c2，所以 normal 指向 c1 (Edge1)
+    # 如果 dis 非常小，normal 可能会不稳定，wp.closest_point 内部处理了
     collision_normal = diff / dis
 
     if 0.0 < dis < collision_radius:
+        # Barycentric weights specific to the vector (c1 - c2)
+        # c1 = (1-s)v1 + s*v2
+        # c2 = (1-t)v3 + t*v4
+        # diff = (1-s)v1 + s*v2 - (1-t)v3 - t*v4
+        # Coefficients: [1-s, s, -1+t, -t]
         bs = wp.vec4(1.0 - s, s, -1.0 + t, -t)
 
         dEdD, d2E_dDdD = evaluate_self_contact_force_norm(dis, collision_radius, collision_stiffness)
 
+        # 1. 基础弹性部分 (Core Elastic Force & Hessian)
         collision_force = -dEdD * collision_normal
         collision_hessian = d2E_dDdD * wp.outer(collision_normal, collision_normal)
 
+        # --- [新增] Damping 处理 ---
+        if collision_damping > 0.0:
+            inv_dt = 1.0 / dt
+            
+            # 计算4个顶点的速度
+            v_a = (e1_v1_pos - pos_prev[e1_v1]) * inv_dt
+            v_b = (e1_v2_pos - pos_prev[e1_v2]) * inv_dt
+            v_c = (e2_v1_pos - pos_prev[e2_v1]) * inv_dt
+            v_d = (e2_v2_pos - pos_prev[e2_v2]) * inv_dt
+
+            # 计算接触点处的相对速度 (v_c1 - v_c2)
+            # 利用同样的重心坐标权重 bs 组合速度
+            v_rel = v_a * bs[0] + v_b * bs[1] + v_c * bs[2] + v_d * bs[3]
+
+            # 投影相对速度到法线方向
+            # normal 从 c2 指向 c1。
+            # v_rel = v_c1 - v_c2.
+            # dot > 0 表示分离，dot < 0 表示靠近(挤压)
+            v_proj = wp.dot(v_rel, collision_normal)
+
+            # 只在相互靠近（挤压）时施加阻尼
+            if v_proj < 0.0:
+                # 1. 阻尼力: f = -kd * (K * v)
+                # K * v = (k * n * n^T) * v_rel = k * n * (v_proj)
+                # 这里我们直接用算好的 3x3 collision_hessian 矩阵乘向量
+                damping_force_vec = -collision_damping * (collision_hessian * v_rel)
+                
+                # 将阻尼力叠加到总力
+                collision_force += damping_force_vec
+
+                # 2. 阻尼 Hessian: K_new = K * (1 + kd/dt)
+                scale = 1.0 + collision_damping * inv_dt
+                collision_hessian *= scale
+        # -------------------------
+
+        # 以下代码保持不变，负责将 3x3 的核心力和矩阵分发给 4x4 的块
         ### edge1
         collision_force_a = collision_force * bs[0]
         collision_force_b = collision_force * bs[1]
 
         collision_hessian_aa = collision_hessian * bs[0] * bs[0]
         collision_hessian_bb = collision_hessian * bs[1] * bs[1]
-        collision_hessian_ab = collision_hessian * bs[0] * bs[1] #+ bs[0] * bs[1] * friction_hessian
-        collision_hessian_ba = collision_hessian * bs[1] * bs[0] #+ bs[1] * bs[0] * friction_hessian
-        # collision_normal_normal_sign = wp.vec4(1.0, 1.0, -1.0, -1.0)
+        collision_hessian_ab = collision_hessian * bs[0] * bs[1] 
+        collision_hessian_ba = collision_hessian * bs[1] * bs[0] 
 
         ### edge2
         collision_force_c = collision_force * bs[2]
@@ -1698,21 +1816,20 @@ def zcy_evaluate_edge_edge_contact_2_vertices(
 
         collision_hessian_cc = collision_hessian * bs[2] * bs[2]
         collision_hessian_dd = collision_hessian * bs[3] * bs[3]
-        collision_hessian_cd = collision_hessian * bs[2] * bs[3] #+ bs[2] * bs[3] * friction_hessian
-        collision_hessian_dc = collision_hessian * bs[3] * bs[2] #+ bs[3] * bs[2] * friction_hessian
-        # collision_normal_normal_sign = wp.vec4(1.0, 1.0, -1.0, -1.0)
+        collision_hessian_cd = collision_hessian * bs[2] * bs[3] 
+        collision_hessian_dc = collision_hessian * bs[3] * bs[2] 
 
         # edge1 to edge2
-        collision_hessian_ac = bs[0] * bs[2] * collision_hessian  #+ bs[0] * bs[2] * friction_hessian
-        collision_hessian_ad = bs[0] * bs[3] * collision_hessian  #+ bs[0] * bs[3] * friction_hessian
-        collision_hessian_bc = bs[1] * bs[2] * collision_hessian  #+ bs[1] * bs[2] * friction_hessian
-        collision_hessian_bd = bs[1] * bs[3] * collision_hessian  #+ bs[1] * bs[3] * friction_hessian
+        collision_hessian_ac = bs[0] * bs[2] * collision_hessian  
+        collision_hessian_ad = bs[0] * bs[3] * collision_hessian  
+        collision_hessian_bc = bs[1] * bs[2] * collision_hessian  
+        collision_hessian_bd = bs[1] * bs[3] * collision_hessian  
 
         # edge2 to edge1
-        collision_hessian_ca = bs[2] * bs[0] * collision_hessian  #+ bs[2] * bs[0] * friction_hessian
-        collision_hessian_cb = bs[2] * bs[1] * collision_hessian  #+ bs[2] * bs[1] * friction_hessian
-        collision_hessian_da = bs[3] * bs[0] * collision_hessian  #+ bs[3] * bs[0] * friction_hessian
-        collision_hessian_db = bs[3] * bs[1] * collision_hessian  #+ bs[3] * bs[1] * friction_hessian
+        collision_hessian_ca = bs[2] * bs[0] * collision_hessian  
+        collision_hessian_cb = bs[2] * bs[1] * collision_hessian  
+        collision_hessian_da = bs[3] * bs[0] * collision_hessian  
+        collision_hessian_db = bs[3] * bs[1] * collision_hessian  
 
         return True, collision_force_a, collision_force_b, collision_force_c, collision_force_d,\
                     collision_hessian_aa, collision_hessian_ab, collision_hessian_ac, collision_hessian_ad, \
@@ -1734,6 +1851,8 @@ def zcy_evaluate_vertex_triangle_collision_force_hessian_4_vertices(
     v: int,
     tri: int,
     pos: wp.array(dtype=wp.vec3),
+    pos_prev: wp.array(dtype=wp.vec3),  # [新增] 用于计算速度
+    dt: float,                          # [新增] 时间步长
     tri_indices: wp.array(dtype=wp.int32, ndim=2),
     collision_radius: float,
     collision_stiffness: float,
@@ -1741,50 +1860,100 @@ def zcy_evaluate_vertex_triangle_collision_force_hessian_4_vertices(
     friction_coefficient: float,
     friction_epsilon: float,
 ):
-    a = pos[tri_indices[tri, 0]]
-    b = pos[tri_indices[tri, 1]]
-    c = pos[tri_indices[tri, 2]]
+    # 获取三角形三个顶点的索引
+    idx_a = tri_indices[tri, 0]
+    idx_b = tri_indices[tri, 1]
+    idx_c = tri_indices[tri, 2]
 
+    a = pos[idx_a]
+    b = pos[idx_b]
+    c = pos[idx_c]
     p = pos[v]
 
     closest_p, bary, feature_type = triangle_closest_point(a, b, c, p)
 
+    # diff 指向 P (Vertex) 的方向: P - ClosestPoint
     diff = p - closest_p
     dis = wp.length(diff)
+    
+    # 防止除零 (wp.closest_point 通常保证 diff 非零，但在极端重叠下需小心)
     collision_normal = diff / dis
 
     if 0.0 < dis < collision_radius:
+        # bs = [-u, -v, -w, 1]
+        # 对应梯度权重: Triangle Vertices (负权重), Point Vertex (正权重)
         bs = wp.vec4(-bary[0], -bary[1], -bary[2], 1.0)
 
         dEdD, d2E_dDdD = evaluate_self_contact_force_norm(dis, collision_radius, collision_stiffness)
 
+        # 1. 基础弹性力和 Hessian (3x3 Core)
         collision_force = -dEdD * collision_normal
         collision_hessian = d2E_dDdD * wp.outer(collision_normal, collision_normal)
 
+        # --- [新增] Damping 处理 ---
+        if collision_damping > 0.0:
+            inv_dt = 1.0 / dt
+            
+            # 计算4个顶点的速度
+            vel_a = (a - pos_prev[idx_a]) * inv_dt
+            vel_b = (b - pos_prev[idx_b]) * inv_dt
+            vel_c = (c - pos_prev[idx_c]) * inv_dt
+            vel_p = (p - pos_prev[v]) * inv_dt
+
+            # 计算相对速度 (v_point - v_closest_on_triangle)
+            # 因为 bs 前三项是负的，最后一项是 1.0
+            # v_rel = 1.0 * vel_p + (-u)*vel_a + (-v)*vel_b + (-w)*vel_c
+            # 这正好就是我们需要的物理相对速度
+            v_rel = vel_a * bs[0] + vel_b * bs[1] + vel_c * bs[2] + vel_p * bs[3]
+
+            # 投影到碰撞法线方向 (Normal 指向 P)
+            # dot < 0 表示 P 和三角形正在相互靠近(挤压)
+            v_proj = wp.dot(v_rel, collision_normal)
+
+            if v_proj < 0.0:
+                # 1. 阻尼力: f_damp = -kd * (K * v_rel)
+                # 使用已经算好的刚度矩阵 collision_hessian
+                damping_force_vec = -collision_damping * (collision_hessian * v_rel)
+                
+                # 叠加力
+                collision_force += damping_force_vec
+
+                # 2. 阻尼 Hessian: K_new = K * (1 + kd/dt)
+                scale = 1.0 + collision_damping * inv_dt
+                collision_hessian *= scale
+        # -------------------------
+
+        # 以下逻辑保持不变 (利用 bs 权重分发核心力和矩阵)
+        
+        # Force Distribution
         collision_force_a = collision_force * bs[0]
         collision_force_b = collision_force * bs[1]
         collision_force_c = collision_force * bs[2]
         collision_force_d = collision_force * bs[3]
 
+        # Hessian Diagonal Blocks
         collision_hessian_aa = collision_hessian * bs[0] * bs[0]
         collision_hessian_bb = collision_hessian * bs[1] * bs[1]
         collision_hessian_cc = collision_hessian * bs[2] * bs[2]
         collision_hessian_dd = collision_hessian * bs[3] * bs[3]
-        # collision_normal_normal_sign = wp.vec4(-1.0, -1.0, -1.0, 1.0)
 
-        # vertex to triangle
-        collision_hessian_ab = bs[0] * bs[1] * collision_hessian #+ bs[0] * bs[1] * friction_hessian
-        collision_hessian_ac = bs[0] * bs[2] * collision_hessian #+ bs[0] * bs[2] * friction_hessian
-        collision_hessian_ad = bs[0] * bs[3] * collision_hessian #+ bs[0] * bs[3] * friction_hessian
-        collision_hessian_ba = bs[1] * bs[0] * collision_hessian #+ bs[1] * bs[0] * friction_hessian
-        collision_hessian_bc = bs[1] * bs[2] * collision_hessian #+ bs[1] * bs[2] * friction_hessian
-        collision_hessian_bd = bs[1] * bs[3] * collision_hessian #+ bs[1] * bs[3] * friction_hessian
-        collision_hessian_ca = bs[2] * bs[0] * collision_hessian #+ bs[2] * bs[0] * friction_hessian
-        collision_hessian_cb = bs[2] * bs[1] * collision_hessian #+ bs[2] * bs[1] * friction_hessian
-        collision_hessian_cd = bs[2] * bs[3] * collision_hessian #+ bs[2] * bs[3] * friction_hessian
-        collision_hessian_da = bs[3] * bs[0] * collision_hessian #+ bs[3] * bs[0] * friction_hessian
-        collision_hessian_db = bs[3] * bs[1] * collision_hessian #+ bs[3] * bs[1] * friction_hessian
-        collision_hessian_dc = bs[3] * bs[2] * collision_hessian #+ bs[3] * bs[2] * friction_hessian
+        # Hessian Off-Diagonal Blocks
+        # vertex (d) to triangle (a,b,c) interactions and triangle internal interactions
+        collision_hessian_ab = bs[0] * bs[1] * collision_hessian 
+        collision_hessian_ac = bs[0] * bs[2] * collision_hessian 
+        collision_hessian_ad = bs[0] * bs[3] * collision_hessian 
+        
+        collision_hessian_ba = bs[1] * bs[0] * collision_hessian 
+        collision_hessian_bc = bs[1] * bs[2] * collision_hessian 
+        collision_hessian_bd = bs[1] * bs[3] * collision_hessian 
+        
+        collision_hessian_ca = bs[2] * bs[0] * collision_hessian 
+        collision_hessian_cb = bs[2] * bs[1] * collision_hessian 
+        collision_hessian_cd = bs[2] * bs[3] * collision_hessian 
+        
+        collision_hessian_da = bs[3] * bs[0] * collision_hessian 
+        collision_hessian_db = bs[3] * bs[1] * collision_hessian 
+        collision_hessian_dc = bs[3] * bs[2] * collision_hessian 
 
 
         return (
@@ -1801,26 +1970,11 @@ def zcy_evaluate_vertex_triangle_collision_force_hessian_4_vertices(
 
         return (
             False,
-            collision_force,
-            collision_force,
-            collision_force,
-            collision_force,
-            collision_hessian,
-            collision_hessian,
-            collision_hessian,
-            collision_hessian,
-            collision_hessian,
-            collision_hessian,
-            collision_hessian,
-            collision_hessian,
-            collision_hessian,
-            collision_hessian,
-            collision_hessian,
-            collision_hessian,
-            collision_hessian,
-            collision_hessian,
-            collision_hessian,
-            collision_hessian,
+            collision_force, collision_force, collision_force, collision_force,
+            collision_hessian, collision_hessian, collision_hessian, collision_hessian,
+            collision_hessian, collision_hessian, collision_hessian, collision_hessian,
+            collision_hessian, collision_hessian, collision_hessian, collision_hessian,
+            collision_hessian, collision_hessian, collision_hessian, collision_hessian,
         )
 
 @wp.func
@@ -2607,6 +2761,8 @@ def zcy_truncation_by_conservative_bounds(
 def zcy_VBD_accumulate_contact_force_and_hessian(
     # inputs
     pos: wp.array(dtype=wp.vec3),
+    pos_prev: wp.array(dtype=wp.vec3),
+    dt: float,
     temp_mem1: wp.array(dtype=float),
     temp_mem2: wp.array(dtype=float),
     tri_indices: wp.array(dtype=wp.int32, ndim=2),
@@ -2657,6 +2813,8 @@ def zcy_VBD_accumulate_contact_force_and_hessian(
                     e1_idx,
                     e2_idx,
                     pos,
+                    pos_prev,
+                    dt,
                     edge_indices,
                     collision_radius,
                     soft_contact_ke,
@@ -2794,6 +2952,8 @@ def zcy_VBD_accumulate_contact_force_and_hessian(
                 particle_idx,
                 tri_idx,
                 pos,
+                pos_prev,
+                dt,
                 tri_indices,
                 collision_radius,
                 soft_contact_ke,
@@ -2911,11 +3071,14 @@ def zcy_VBD_accumulate_contact_force_and_hessian(
 def zcy_accumulate_spring_force_and_hessian(
     # inputs
     pos: wp.array(dtype=wp.vec3),
+    pos_prev: wp.array(dtype=wp.vec3),
+    dt: float,
     temp_mem: wp.array(dtype=float),
     # spring constraints
     spring_indices: wp.array(dtype=int),
     spring_rest_length: wp.array(dtype=float),
     spring_stiffness: wp.array(dtype=float),
+    damping_ratio: float,
     # outputs: particle force and hessian
     spring_forces: wp.array(dtype=wp.vec3),
     spring_hessian_values: wp.array(dtype=wp.mat33),
@@ -2934,6 +3097,32 @@ def zcy_accumulate_spring_force_and_hessian(
         spring_rest_length[spring_index],
         spring_stiffness[spring_index],
     )
+
+    # --- [Rayleigh Damping 添加部分] ---
+    if damping_ratio > 0.0:
+        inv_dt = 1.0 / dt
+        
+        # A. 计算相对速度 (v_i - v_j)
+        # 既然 f_ij 是 i 点受力，我们需要基于 i 和 j 的相对运动来阻碍它
+        vel_i = (v0 - pos_prev[i]) * inv_dt
+        vel_j = (v1 - pos_prev[j]) * inv_dt
+        rel_vel = vel_i - vel_j
+
+        # B. 计算阻尼力
+        # 公式: f_damp_on_i = -kd * (K_ii * v_i + K_ij * v_j)
+        # 对于弹簧: K_ii = H, K_ij = -H
+        # 所以: f_damp_on_i = -kd * H * (v_i - v_j)
+        f_damp = -damping_ratio * (H * rel_vel)
+        
+        # 叠加到总力
+        f_ij += f_damp
+
+        # C. 缩放 Hessian
+        # 系数 scale = 1.0 + kd / dt
+        scale = 1.0 + damping_ratio * inv_dt
+        H = H * scale
+    # -----------------------------------
+
     H_aa, H_ab, H_ba, H_bb = filter_hessian_6x6_device(
         H, -H,
         -H, H,
@@ -3481,6 +3670,8 @@ def build_bsr_from_block_coo(blocks_data: np.ndarray,
 def zcy_accumulate_stvk_force_and_hessian(
     # inputs
     pos: wp.array(dtype=wp.vec3),
+    pos_prev: wp.array(dtype=wp.vec3),
+    dt: float,
     temp_mem: wp.array(dtype=float),
     # stvk force and hessian
     tri_indices: wp.array(dtype=wp.int32, ndim=2),
@@ -3504,11 +3695,14 @@ def zcy_accumulate_stvk_force_and_hessian(
     f_a, f_b, f_c, h_aa, h_ab, h_ac, h_ba, h_bb, h_bc, h_ca, h_cb, h_cc = zcy_evaluate_stvk_force_hessian(
         tri_index,
         pos,
+        pos_prev,
         tri_indices,
         tri_poses[tri_index],
         tri_areas[tri_index],
         tri_materials[tri_index, 0],
         tri_materials[tri_index, 1],
+        tri_materials[tri_index, 2],
+        dt,
     )
 
     (
@@ -3579,6 +3773,8 @@ def zcy_accumulate_stvk_force_and_hessian(
 @wp.kernel
 def zcy_accumulate_bending_force_and_hessian(
     pos: wp.array(dtype=wp.vec3),
+    pos_prev: wp.array(dtype=wp.vec3),
+    dt: float,
     temp_mem: wp.array(dtype=float),
     edge_indices: wp.array(dtype=wp.int32, ndim=2),
     edge_rest_angle: wp.array(dtype=float),
@@ -3601,16 +3797,17 @@ def zcy_accumulate_bending_force_and_hessian(
     k = edge_indices[edge_index, 2]
     l = edge_indices[edge_index, 3]
 
-    ke = edge_bending_properties[edge_index, 0]
-
     # 单元评估：返回四力与 16 个 3x3 Hessian 子块
     f0, f1, f2, f3, h00, h01, h02, h03, h10, h11, h12, h13, h20, h21, h22, h23, h30, h31, h32, h33 = zcy_evaluate_dihedral_angle_based_bending_force_hessian(
         edge_index,
         pos,
+        pos_prev,
         edge_indices,
         edge_rest_angle,
         edge_rest_length,
-        ke,
+        edge_bending_properties[edge_index, 0],
+        edge_bending_properties[edge_index, 1],
+        dt,
     )
     # 
     (
@@ -3877,7 +4074,7 @@ class zcy_SolverVBD(SolverBase):
             self.zcy_collision_detection_penetration_free(pos_warp)
 
             # assemble matrix and vector
-            A = self.zcy_assemble_matrix(pos_warp)
+            A = self.zcy_assemble_matrix(pos_warp, pos_prev_warp, dt)
             b = self.zcy_assemble_vector(pos_warp, pos_prev_warp, vel_warp, dt, mass)
             '''
             # preallocate memory for dx
@@ -4233,13 +4430,13 @@ class zcy_SolverVBD(SolverBase):
 
         return b
 
-    def zcy_assemble_matrix(self, pos_warp):
+    def zcy_assemble_matrix(self, pos_warp, pos_prev_warp, dt):
         # contact hessian
-        edge_contact_hessian_rows, edge_contact_hessian_cols, edge_contact_hessian_values, vt_contact_hessian_rows, vt_contact_hessian_cols, vt_contact_hessian_values = self.zcy_compute_contact_hessian_force(pos_warp)
+        edge_contact_hessian_rows, edge_contact_hessian_cols, edge_contact_hessian_values, vt_contact_hessian_rows, vt_contact_hessian_cols, vt_contact_hessian_values = self.zcy_compute_contact_hessian_force(pos_warp, pos_prev_warp, dt)
         # spring hessian
-        spring_hessian_rows, spring_hessian_cols, spring_hessian_values = self.zcy_compute_spring_hessian_force(pos_warp)
+        spring_hessian_rows, spring_hessian_cols, spring_hessian_values = self.zcy_compute_spring_hessian_force(pos_warp, pos_prev_warp, dt)
         # bending hessian
-        bending_hessian_rows, bending_hessian_cols, bending_hessian_values = self.zcy_compute_bending_hessian_force(pos_warp)
+        bending_hessian_rows, bending_hessian_cols, bending_hessian_values = self.zcy_compute_bending_hessian_force(pos_warp, pos_prev_warp, dt)
         
         A_rows = np.concatenate((self.A_rows, spring_hessian_rows.numpy(), edge_contact_hessian_rows.numpy(), vt_contact_hessian_rows.numpy(), bending_hessian_rows.numpy()), axis=0)
         A_cols = np.concatenate((self.A_cols, spring_hessian_cols.numpy(), edge_contact_hessian_cols.numpy(), vt_contact_hessian_cols.numpy(), bending_hessian_cols.numpy()), axis=0)
@@ -4266,7 +4463,7 @@ class zcy_SolverVBD(SolverBase):
 
     def zcy_compute_residual(self, pos_warp, pos_prev_warp, vel_warp, dt, mass):
         # refit
-        _ = self.zcy_assemble_matrix(pos_warp)
+        _ = self.zcy_assemble_matrix(pos_warp, pos_prev_warp, dt)
         
         # inertia and gravity
         residual = wp.zeros(shape=(self.free_particle_num,), dtype=wp.vec3)
@@ -4419,7 +4616,7 @@ class zcy_SolverVBD(SolverBase):
         self.A_values = np.array([np.eye(3) * mass / dt**2 for _ in range(self.num_particle)])
         
     def zcy_compute_contact_hessian_force(
-        self, pos_warp
+        self, pos_warp, pos_prev_warp, dt,
     ):
         # edge_contact
         self.edge_contact_forces.zero_()
@@ -4446,6 +4643,8 @@ class zcy_SolverVBD(SolverBase):
             dim=self.num_contact,
             inputs=[
                 pos_warp,
+                pos_prev_warp,
+                dt,
                 temp_buffer1,
                 temp_buffer2,
                 self.model.tri_indices,
@@ -4495,7 +4694,7 @@ class zcy_SolverVBD(SolverBase):
         return edge_contact_hessian_rows, edge_contact_hessian_cols, edge_contact_hessian_values, vt_contact_hessian_rows, vt_contact_hessian_cols, vt_contact_hessian_values
 
     def zcy_compute_spring_hessian_force(
-        self, pos_warp,
+        self, pos_warp, pos_prev_warp, dt
     ):
         # choose energy
         # spring
@@ -4515,11 +4714,14 @@ class zcy_SolverVBD(SolverBase):
                 kernel=zcy_accumulate_spring_force_and_hessian,
                 inputs=[
                     pos_warp,
+                    pos_prev_warp,
+                    dt,
                     temp_buffer,
                     # spring constraints
                     self.spring_indices,
                     self.spring_rest_length,
                     self.spring_stiffness,
+                    self.model.spring_damping,
                     # outputs: particle force and hessian
                     self.spring_forces,
                     self.spring_hessian_values,
@@ -4539,6 +4741,8 @@ class zcy_SolverVBD(SolverBase):
                 kernel=zcy_accumulate_stvk_force_and_hessian,
                 inputs=[
                     pos_warp,
+                    pos_prev_warp,
+                    dt,
                     temp_buffer,
                     # stvk force and hessian
                     self.model.tri_indices,
@@ -4563,7 +4767,7 @@ class zcy_SolverVBD(SolverBase):
         return spring_hessian_rows, spring_hessian_cols, spring_hessian_values
 
     def zcy_compute_bending_hessian_force(
-        self, pos_warp,
+        self, pos_warp, pos_prev_warp, dt
     ):
         # bending
         self.bending_forces.zero_()
@@ -4581,6 +4785,8 @@ class zcy_SolverVBD(SolverBase):
             kernel=zcy_accumulate_bending_force_and_hessian,
             inputs=[
                 pos_warp,
+                pos_prev_warp,
+                dt,
                 temp_buffer,
                 # bending force and hessian
                 self.model.edge_indices,
