@@ -2811,25 +2811,25 @@ def zcy_VBD_accumulate_contact_force_and_hessian(
                 e2_v1 = edge_indices[e2_idx, 2]
                 e2_v2 = edge_indices[e2_idx, 3]
 
-            (has_contact, collision_force_a, collision_force_b, collision_force_c, collision_force_d,
-                    collision_hessian_aa, collision_hessian_ab, collision_hessian_ac, collision_hessian_ad, 
-                    collision_hessian_ba, collision_hessian_bb, collision_hessian_bc, collision_hessian_bd, 
-                    collision_hessian_ca, collision_hessian_cb, collision_hessian_cc, collision_hessian_cd, 
-                    collision_hessian_da, collision_hessian_db, collision_hessian_dc, collision_hessian_dd
-            ) =  zcy_evaluate_edge_edge_contact_2_vertices(
-                    e1_idx,
-                    e2_idx,
-                    pos,
-                    pos_prev,
-                    dt,
-                    edge_indices,
-                    collision_radius,
-                    soft_contact_ke,
-                    soft_contact_kd,
-                    friction_mu,
-                    friction_epsilon,
-                    edge_edge_parallel_epsilon,
-                )
+                (has_contact, collision_force_a, collision_force_b, collision_force_c, collision_force_d,
+                        collision_hessian_aa, collision_hessian_ab, collision_hessian_ac, collision_hessian_ad, 
+                        collision_hessian_ba, collision_hessian_bb, collision_hessian_bc, collision_hessian_bd, 
+                        collision_hessian_ca, collision_hessian_cb, collision_hessian_cc, collision_hessian_cd, 
+                        collision_hessian_da, collision_hessian_db, collision_hessian_dc, collision_hessian_dd
+                ) =  zcy_evaluate_edge_edge_contact_2_vertices(
+                        e1_idx,
+                        e2_idx,
+                        pos,
+                        pos_prev,
+                        dt,
+                        edge_indices,
+                        collision_radius,
+                        soft_contact_ke,
+                        soft_contact_kd,
+                        friction_mu,
+                        friction_epsilon,
+                        edge_edge_parallel_epsilon,
+                    )
 
                 if DeBUG_Eigen:
                     # 1. 左边用括号包裹，允许换行
@@ -2951,24 +2951,24 @@ def zcy_VBD_accumulate_contact_force_and_hessian(
                 tri_b = tri_indices[tri_idx, 1]
                 tri_c = tri_indices[tri_idx, 2]
 
-            (has_contact, collision_force_a, collision_force_b, collision_force_c, collision_force_d,
-                    collision_hessian_aa, collision_hessian_ab, collision_hessian_ac, collision_hessian_ad, 
-                    collision_hessian_ba, collision_hessian_bb, collision_hessian_bc, collision_hessian_bd, 
-                    collision_hessian_ca, collision_hessian_cb, collision_hessian_cc, collision_hessian_cd, 
-                    collision_hessian_da, collision_hessian_db, collision_hessian_dc, collision_hessian_dd
-            ) = zcy_evaluate_vertex_triangle_collision_force_hessian_4_vertices(
-                particle_idx,
-                tri_idx,
-                pos,
-                pos_prev,
-                dt,
-                tri_indices,
-                collision_radius,
-                soft_contact_ke,
-                soft_contact_kd,
-                friction_mu,
-                friction_epsilon,
-            )
+                (has_contact, collision_force_a, collision_force_b, collision_force_c, collision_force_d,
+                        collision_hessian_aa, collision_hessian_ab, collision_hessian_ac, collision_hessian_ad, 
+                        collision_hessian_ba, collision_hessian_bb, collision_hessian_bc, collision_hessian_bd, 
+                        collision_hessian_ca, collision_hessian_cb, collision_hessian_cc, collision_hessian_cd, 
+                        collision_hessian_da, collision_hessian_db, collision_hessian_dc, collision_hessian_dd
+                ) = zcy_evaluate_vertex_triangle_collision_force_hessian_4_vertices(
+                    particle_idx,
+                    tri_idx,
+                    pos,
+                    pos_prev,
+                    dt,
+                    tri_indices,
+                    collision_radius,
+                    soft_contact_ke,
+                    soft_contact_kd,
+                    friction_mu,
+                    friction_epsilon,
+                )
 
                 if DeBUG_Eigen:
                     # 1. 左边用括号包裹，允许换行
@@ -3283,9 +3283,9 @@ def zcy_accumulate_stvk_force_and_hessian(
 @wp.kernel
 def zcy_accumulate_bending_force_and_hessian(
     pos: wp.array(dtype=wp.vec3),
+    DeBUG_Eigen: bool,
     pos_prev: wp.array(dtype=wp.vec3),
     dt: float,
-    DeBUG_Eigen: bool,
     temp_mem: wp.array(dtype=float),
     edge_indices: wp.array(dtype=wp.int32, ndim=2),
     edge_rest_angle: wp.array(dtype=float),
@@ -4024,7 +4024,7 @@ class zcy_SolverVBD(SolverBase):
         self.all_particle_flag = all_particle_flag
 
         # sparse hessian
-        self.spring = 0
+        self.spring = self.DeBUG['spring_type']
         self.num_spring = self.spring_rest_length.shape[0]
         self.num_triangles = self.model.tri_indices.shape[0]
 
@@ -4087,13 +4087,17 @@ class zcy_SolverVBD(SolverBase):
         # debug_information_log
         if self.DeBUG['DeBUG']:
             log_residual_path = "run_twist_cloth_residual_log.txt"
-            log_warning_path = "run_twist_cloth_warning_log.txt"
-            path_hessian = "run_hessian_isbeing_log.txt"
             with open(log_residual_path, "a", encoding="utf-8") as f:
                     f.write(f'--- time_step: {time_step} ---\n')
                     f.write(f'forward: residual_norm_forward: {residual_norm_forward}, energy_forward: {energy_forward}\n')
-            with open(path_hessian, "a") as f:
-                    f.write(f'\n--- time_step: {time_step} ---\n')
+
+            if self.DeBUG['max_warning']:
+                log_warning_path = "run_twist_cloth_warning_log.txt"
+
+            if self.DeBUG['record_hessian']:
+                path_hessian = "run_hessian_isbeing_log.txt"
+                with open(path_hessian, "a") as f:
+                        f.write(f'\n--- time_step: {time_step} ---\n')
 
         # line search start
         residual0 = residual_forward
@@ -4102,7 +4106,7 @@ class zcy_SolverVBD(SolverBase):
 
         for _iter in range(num_iter):
 
-            if self.DeBUG['DeBUG']:
+            if self.DeBUG['DeBUG'] & self.DeBUG['record_hessian']:
                 with open(path_hessian, "a") as f:
                     f.write(f'--- iter: {_iter} ---\n')
 
@@ -4116,48 +4120,47 @@ class zcy_SolverVBD(SolverBase):
             # assemble matrix and vector
             A = self.zcy_assemble_matrix(pos_warp, pos_prev_warp, dt)
             b = self.zcy_assemble_vector(pos_warp, pos_prev_warp, vel_warp, dt, mass)
-            '''
-            # preallocate memory for dx
-            dx = wp.zeros_like(b)
-            # solve
-            result = cg(A, b, dx, tol=1e-6, maxiter=100)
-            print(f'\n --- iter:{_iter} ---')
-            print('cg_result:', result)
-            '''
+  
             dx = spsolve(A.tocsr(), b.numpy().reshape(self.free_particle_num*3).astype(np.float64))
             dx = wp.array(dx.reshape(self.free_particle_num,3), dtype=wp.vec3)
 
-            if self.DeBUG['DeBUG']:
-                # 优化信息
+            if self.DeBUG['DeBUG'] & self.DeBUG['record_hessian']:
                 A_dense = A.tocsr().toarray()
                 A_sym = (A_dense + A_dense.T) * 0.5
+
+                # ---------- 先判断对称性 ----------
+                is_symmetric = bool(np.allclose(A_dense, A_dense.T, atol=1e-8))
+
+                # ---------- cond 数 ----------
                 try:
                     cond = float(np.linalg.cond(A_dense))
                 except Exception:
                     cond = float("inf")
-                is_symmetric = bool(np.allclose(A_dense, A_dense.T, atol=1e-8))
-                is_spd = False
+
+                # ---------- SPD 判断 ----------
                 eig_min = float("nan")
                 eig_max = float("nan")
+                is_spd = False
+
                 try:
                     eigvals = np.linalg.eigvalsh(A_sym)
                     eig_min = float(eigvals.min())
                     eig_max = float(eigvals.max())
                     is_spd = bool(eig_min > 0.0 and is_symmetric)
                 except Exception:
+                    # eigvalsh失败 → 尝试 Cholesky
                     try:
                         np.linalg.cholesky(A_sym)
                         is_spd = bool(is_symmetric)
                     except Exception:
                         is_spd = False
 
-                # 写入报错信息：
                 with open(path_hessian, "a") as f:
                     f.write(f'\nA.condition_number_and_spd:\n')
                     f.write(f'[cond, is_symmetric, is_spd, eig_min, eig_max]\n')
                     f.write(str([cond, is_symmetric, is_spd, eig_min, eig_max]) + "\n\n")
 
-
+        
             ### line search
             # region: line search
             # 0.parameters
@@ -4199,13 +4202,6 @@ class zcy_SolverVBD(SolverBase):
                 # 1.4.check armijo condition
                 residual1, residual_norm1 = self.zcy_compute_residual(pos_warp_test_alpha, pos_prev_warp, vel_warp, dt, mass)
 
-                '''
-                print('residual_norm0:', residual_norm0)
-                print('residual_norm1:', residual_norm1)
-                print('energy0:', energy0)
-                print('energy1:', energy1)
-                print('incremental_energy:', incremental_energy)
-                '''
 
                 if energy1.numpy().item() < energy0.numpy().item() + incremental_energy.numpy().item() and residual_norm1 < residual_norm0 + 1e-6 :
                     break
@@ -4213,7 +4209,82 @@ class zcy_SolverVBD(SolverBase):
                     alpha *= gamma
 
                 # line search warning
-                if _line_search_times == 19 or incremental_energy.numpy().item() > 0.0 : 
+                if self.DeBUG['DeBUG'] & self.DeBUG['max_warning']:
+                    if _line_search_times == self.DeBUG['line_search_max_step'] or incremental_energy.numpy().item() > 0.0 : 
+                        # 优化信息
+                        A_dense = A.tocsr().toarray()
+                        A_sym = (A_dense + A_dense.T) * 0.5
+                        try:
+                            cond = float(np.linalg.cond(A_dense))
+                        except Exception:
+                            cond = float("inf")
+                        is_symmetric = bool(np.allclose(A_dense, A_dense.T, atol=1e-8))
+                        is_spd = False
+                        eig_min = float("nan")
+                        eig_max = float("nan")
+                        try:
+                            eigvals = np.linalg.eigvalsh(A_sym)
+                            eig_min = float(eigvals.min())
+                            eig_max = float(eigvals.max())
+                            is_spd = bool(eig_min > 0.0 and is_symmetric)
+                        except Exception:
+                            try:
+                                np.linalg.cholesky(A_sym)
+                                is_spd = bool(is_symmetric)
+                            except Exception:
+                                is_spd = False
+
+                        # 写入报错信息：
+                        with open(log_warning_path, "a", encoding="utf-8") as f:
+                            f.write(f'time_step: {time_step} \n')
+                            f.write(f'iter: {_iter} \n')
+                            f.write(f'line_search_times: {_line_search_times} \n')
+                            f.write(f'incremental_energy: {incremental_energy} \n')
+                            f.write(f'cond: {cond} \n')
+                            f.write(f'is_symmetric: {is_symmetric} \n')
+                            f.write(f'is_spd: {is_spd} \n')
+                            f.write(f'eig_min: {eig_min} \n')
+                            f.write(f'eig_max: {eig_max} \n\n\n')
+
+                        '''
+                        print('x', pos_warp)
+                        try:
+                            import os
+                            save_dir = r"c:\data\sim\simulation-beginning\cloth_simulation_newton\run\render\input"
+                            os.makedirs(save_dir, exist_ok=True)
+                            save_path = os.path.join(save_dir, f"cloth_data_error_dump_{time_step}.npy")
+                            pos_np = pos_warp.numpy() if hasattr(pos_warp, "numpy") else pos_warp
+                            np.save(save_path, [pos_np])
+                            print(f"Saved debug frame to {save_path}")
+                        except Exception as e:
+                            print(f"Failed to save debug frame: {e}")
+                        raise RuntimeError(f"\n--- warning: {time_step} line search reach max iter {_line_search_times} or incremental_energy > 0.0 {incremental_energy.numpy()[0]} ---\n")
+                        '''
+                        raise RuntimeError(f"\n--- warning: {time_step} line search reach max iter {_line_search_times} or incremental_energy > 0.0 {incremental_energy.numpy()[0]} ---\n")
+
+            # endregion
+
+            energy0, energy1 = energy1, energy0
+            residual_norm0, residual_norm1 = residual_norm1, residual_norm0
+            residual0, residual1 = residual1, residual0
+
+            pos_warp, pos_warp_test_alpha = pos_warp_test_alpha, pos_warp
+            dx, dx_alpha = dx_alpha, dx
+            
+            print('residual_norm:', residual_norm0, '|energy:', energy0, '|incremental_energy:', incremental_energy, '|alpha:', alpha)
+            
+            if self.DeBUG['DeBUG']:
+                log_residual_path = "run_twist_cloth_residual_log.txt"
+                with open(log_residual_path, "a", encoding="utf-8") as f:
+                        # 写入当前迭代信息
+                        f.write(f'residual_norm: {residual_norm0} |energy: {energy0} |incremental_energy: {incremental_energy} |alpha: {alpha}\n\n')
+                
+            if residual_norm0 < tolerance or residual_norm0/residual_norm_forward < 1e-4 :
+                break
+
+            # region: iteration information 
+            if self.DeBUG['DeBUG'] & self.DeBUG['max_warning']:
+                if _iter == num_iter - 1:
                     # 优化信息
                     A_dense = A.tocsr().toarray()
                     A_sym = (A_dense + A_dense.T) * 0.5
@@ -4237,7 +4308,6 @@ class zcy_SolverVBD(SolverBase):
                         except Exception:
                             is_spd = False
 
-                    # 写入报错信息：
                     with open(log_warning_path, "a", encoding="utf-8") as f:
                         f.write(f'time_step: {time_step} \n')
                         f.write(f'iter: {_iter} \n')
@@ -4248,78 +4318,7 @@ class zcy_SolverVBD(SolverBase):
                         f.write(f'is_spd: {is_spd} \n')
                         f.write(f'eig_min: {eig_min} \n')
                         f.write(f'eig_max: {eig_max} \n\n\n')
-                    
-                    #print('A.condition_number_and_spd:\n')
-                    #print('[cond, is_symmetric, is_spd, eig_min, eig_max]\n')
-                    #print(str([cond, is_symmetric, is_spd, eig_min, eig_max]) + "\n\n")
-
-                    '''
-                    print('x', pos_warp)
-                    try:
-                        import os
-                        save_dir = r"c:\data\sim\simulation-beginning\cloth_simulation_newton\run\render\input"
-                        os.makedirs(save_dir, exist_ok=True)
-                        save_path = os.path.join(save_dir, f"cloth_data_error_dump_{time_step}.npy")
-                        pos_np = pos_warp.numpy() if hasattr(pos_warp, "numpy") else pos_warp
-                        np.save(save_path, [pos_np])
-                        print(f"Saved debug frame to {save_path}")
-                    except Exception as e:
-                        print(f"Failed to save debug frame: {e}")
-                    raise RuntimeError(f"\n--- warning: {time_step} line search reach max iter {_line_search_times} or incremental_energy > 0.0 {incremental_energy.numpy()[0]} ---\n")
-                    '''
-            # endregion
-
-            energy0, energy1 = energy1, energy0
-            residual_norm0, residual_norm1 = residual_norm1, residual_norm0
-            residual0, residual1 = residual1, residual0
-
-            pos_warp, pos_warp_test_alpha = pos_warp_test_alpha, pos_warp
-            dx, dx_alpha = dx_alpha, dx
-            
-            print('residual_norm:', residual_norm0, '|energy:', energy0, '|incremental_energy:', incremental_energy, '|alpha:', alpha)
-            log_residual_path = "run_twist_cloth_residual_log.txt"
-            with open(log_residual_path, "a", encoding="utf-8") as f:
-                    # 写入当前迭代信息
-                    f.write(f'residual_norm: {residual_norm0} |energy: {energy0} |incremental_energy: {incremental_energy} |alpha: {alpha}\n\n')
-            
-            if residual_norm0 < tolerance or residual_norm0/residual_norm_forward < 1e-4 :
-                break
-
-            # region: iteration information 
-            if _iter == num_iter - 1:
-                # 优化信息
-                A_dense = A.tocsr().toarray()
-                A_sym = (A_dense + A_dense.T) * 0.5
-                try:
-                    cond = float(np.linalg.cond(A_dense))
-                except Exception:
-                    cond = float("inf")
-                is_symmetric = bool(np.allclose(A_dense, A_dense.T, atol=1e-8))
-                is_spd = False
-                eig_min = float("nan")
-                eig_max = float("nan")
-                try:
-                    eigvals = np.linalg.eigvalsh(A_sym)
-                    eig_min = float(eigvals.min())
-                    eig_max = float(eigvals.max())
-                    is_spd = bool(eig_min > 0.0 and is_symmetric)
-                except Exception:
-                    try:
-                        np.linalg.cholesky(A_sym)
-                        is_spd = bool(is_symmetric)
-                    except Exception:
-                        is_spd = False
-
-                with open(log_warning_path, "a", encoding="utf-8") as f:
-                    f.write(f'time_step: {time_step} \n')
-                    f.write(f'iter: {_iter} \n')
-                    f.write(f'line_search_times: {_line_search_times} \n')
-                    f.write(f'incremental_energy: {incremental_energy} \n')
-                    f.write(f'cond: {cond} \n')
-                    f.write(f'is_symmetric: {is_symmetric} \n')
-                    f.write(f'is_spd: {is_spd} \n')
-                    f.write(f'eig_min: {eig_min} \n')
-                    f.write(f'eig_max: {eig_max} \n\n\n')
+                    raise RuntimeError(f"\n--- warning: {time_step} iteration reach max iter {_iter} ---\n")
             # endregion
 
         wp.launch(
@@ -4543,6 +4542,9 @@ class zcy_SolverVBD(SolverBase):
         self.A_rows = np.array([i for i in range(self.num_particle)])
         self.A_cols = np.array([i for i in range(self.num_particle)])
         self.A_values = np.array([np.eye(3) * mass / dt**2 for _ in range(self.num_particle)])
+
+        if not self.DeBUG['Inertia_Hessian']:
+            self.A_values.zero_()
         
     def zcy_compute_contact_hessian_force(
         self, pos_warp, pos_prev_warp, dt,
@@ -4625,16 +4627,23 @@ class zcy_SolverVBD(SolverBase):
         #print(f"\nvt_contact_hessian_cols={vt_contact_hessian_cols}, vt_contact_hessian_cols.shape={vt_contact_hessian_cols.shape}")
         #print(f"\nvt_contact_hessian_values={vt_contact_hessian_values}, vt_contact_hessian_values.shape={vt_contact_hessian_values.shape}")
 
-        if self.DeBUG['DeBUG']:
+        if self.DeBUG['DeBUG'] & self.DeBUG['record_hessian']:
             path_hessian = "run_hessian_isbeing_log.txt"
-            contact_ee_hessian = np.abs(self.edge_contact_hessian_values.numpy()).max()
-            contact_ee_residual = np.abs(self.edge_contact_forces.numpy()).max()
-            contact_vt_hessian = np.abs(self.vt_contact_hessian_values.numpy()).max()
-            contact_vt_residual = np.abs(self.vt_contact_forces.numpy()).max()
+            contact_ee_hessian = np.abs(edge_contact_hessian_values.numpy()).max()
+            contact_ee_residual = np.abs(edge_contact_forces.numpy()).max()
+            contact_vt_hessian = np.abs(vt_contact_hessian_values.numpy()).max()
+            contact_vt_residual = np.abs(vt_contact_forces.numpy()).max()
 
             with open(path_hessian, "a") as f:
                 f.write(f"contact_ee_hessian={contact_ee_hessian}, contact_ee_residual={contact_ee_residual}\n")
                 f.write(f"contact_vt_hessian={contact_vt_hessian}, contact_vt_residual={contact_vt_residual}\n")
+                f.write(f"edge_contact_hessian_rows={edge_contact_hessian_rows}\n")
+                f.write(f"edge_contact_hessian_cols={edge_contact_hessian_cols}\n")
+                f.write(f"edge_contact_hessian_values={edge_contact_hessian_values}\n")
+                f.write(f"vt_contact_hessian_rows={vt_contact_hessian_rows}\n")
+                f.write(f"vt_contact_hessian_cols={vt_contact_hessian_cols}\n")
+                f.write(f"vt_contact_hessian_values={vt_contact_hessian_values}\n")
+
 
         return edge_contact_hessian_rows, edge_contact_hessian_cols, edge_contact_hessian_values, vt_contact_hessian_rows, vt_contact_hessian_cols, vt_contact_hessian_values
 
@@ -4656,71 +4665,74 @@ class zcy_SolverVBD(SolverBase):
                 temp_mem_size = self.num_spring * 72
                 temp_buffer = wp.zeros(temp_mem_size, dtype=float, device=self.device)
 
-            wp.launch(
-                kernel=zcy_accumulate_spring_force_and_hessian,
-                inputs=[
-                    pos_warp,
-                    # DeBUG
-                    self.DeBUG['Eigen'],
-                    pos_prev_warp,
-                    dt,
-                    temp_buffer,
-                    # spring constraints
-                    self.spring_indices,
-                    self.spring_rest_length,
-                    self.spring_stiffness,
-                    self.model.spring_damping,
-                    # outputs: particle force and hessian
-                    self.spring_forces,
-                    self.spring_hessian_values,
-                    self.spring_hessian_rows,
-                    self.spring_hessian_cols
-                ],
-                dim=self.num_spring,
-                device=self.device,
-            )
-        else :
-            # eigen filtering
-            # 162 = 81 (矩阵) + 81 (特征向量)
-            temp_mem_size = self.num_triangles * 162
-            temp_buffer = wp.zeros(temp_mem_size, dtype=float, device=self.device)
+                wp.launch(
+                    kernel=zcy_accumulate_spring_force_and_hessian,
+                    inputs=[
+                        pos_warp,
+                        # DeBUG
+                        self.DeBUG['Eigen'],
+                        pos_prev_warp,
+                        dt,
+                        temp_buffer,
+                        # spring constraints
+                        self.spring_indices,
+                        self.spring_rest_length,
+                        self.spring_stiffness,
+                        self.model.spring_damping,
+                        # outputs: particle force and hessian
+                        self.spring_forces,
+                        self.spring_hessian_values,
+                        self.spring_hessian_rows,
+                        self.spring_hessian_cols
+                    ],
+                    dim=self.num_spring,
+                    device=self.device,
+                )
+            else :
+                # eigen filtering
+                # 162 = 81 (矩阵) + 81 (特征向量)
+                temp_mem_size = self.num_triangles * 162
+                temp_buffer = wp.zeros(temp_mem_size, dtype=float, device=self.device)
 
-            wp.launch(
-                kernel=zcy_accumulate_stvk_force_and_hessian,
-                inputs=[
-                    pos_warp,
-                    # DeBUG
-                    self.DeBUG['Eigen'],
-                    pos_prev_warp,
-                    dt,
-                    temp_buffer,
-                    # stvk force and hessian
-                    self.model.tri_indices,
-                    self.model.tri_poses,
-                    self.model.tri_materials,
-                    self.model.tri_areas,
-                    # outputs: particle force and hessian
-                    self.spring_forces,
-                    self.spring_hessian_values,
-                    self.spring_hessian_rows,
-                    self.spring_hessian_cols
-                ],
-                dim=self.num_triangles,
-                device=self.device,
-            )
+                wp.launch(
+                    kernel=zcy_accumulate_stvk_force_and_hessian,
+                    inputs=[
+                        pos_warp,
+                        # DeBUG
+                        self.DeBUG['Eigen'],
+                        pos_prev_warp,
+                        dt,
+                        temp_buffer,
+                        # stvk force and hessian
+                        self.model.tri_indices,
+                        self.model.tri_poses,
+                        self.model.tri_materials,
+                        self.model.tri_areas,
+                        # outputs: particle force and hessian
+                        self.spring_forces,
+                        self.spring_hessian_values,
+                        self.spring_hessian_rows,
+                        self.spring_hessian_cols
+                    ],
+                    dim=self.num_triangles,
+                    device=self.device,
+                )
         
         # spring
         #print('\n---spring---')
         spring_hessian_rows, spring_hessian_cols, spring_hessian_values = warp_coo_deduplicate(
             self.spring_hessian_rows, self.spring_hessian_cols, self.spring_hessian_values)
 
-        if self.DeBUG['DeBUG']:
+        if self.DeBUG['DeBUG'] & self.DeBUG['record_hessian']:
             path_hessian = "run_hessian_isbeing_log.txt"
-            spring_hessian = np.abs(self.spring_hessian_values.numpy()).max()
-            spring_residual = np.abs(self.spring_forces.numpy()).max()
+            spring_hessian = np.abs(spring_hessian_values.numpy()).max()
+            spring_residual = np.abs(spring_forces.numpy()).max()
 
             with open(path_hessian, "a") as f:
                 f.write(f"spring_hessian={spring_hessian}, spring_residual={spring_residual}\n")
+                f.write(f"spring_hessian_rows={spring_hessian_rows}\n")
+                f.write(f"spring_hessian_cols={spring_hessian_cols}\n")
+                f.write(f"spring_hessian_values={spring_hessian_values}\n")
 
         return spring_hessian_rows, spring_hessian_cols, spring_hessian_values
 
@@ -4739,7 +4751,7 @@ class zcy_SolverVBD(SolverBase):
         temp_buffer = wp.zeros(temp_mem_size, dtype=float, device=self.device)
 
         if self.DeBUG['Bending']:
-        # dim             
+            # dim             
             wp.launch(
                 kernel=zcy_accumulate_bending_force_and_hessian,
                 inputs=[
@@ -4771,13 +4783,16 @@ class zcy_SolverVBD(SolverBase):
         #print(f"\nbending_hessian_rows={bending_hessian_rows}, bending_hessian_rows.shape={bending_hessian_rows.shape}")
         #print(f"\nbending_hessian_cols={bending_hessian_cols}, bending_hessian_cols.shape={bending_hessian_cols.shape}")
         #print(f"\nbending_hessian_values={bending_hessian_values}, bending_hessian_values.shape={bending_hessian_values.shape}")
-        if self.DeBUG['DeBUG']:
+        if self.DeBUG['DeBUG'] & self.DeBUG['record_hessian']:
             path_hessian = "run_hessian_isbeing_log.txt"
             bending_hessian = np.abs(bending_hessian_values.numpy()).max()
-            bending_residual = np.abs(self.bending_forces.numpy()).max()
+            bending_residual = np.abs(bending_forces.numpy()).max()
 
             with open(path_hessian, "a") as f:
                 f.write(f"bending_hessian={bending_hessian}, bending_residual={bending_residual}\n")
+                f.write(f"bending_hessian_rows={bending_hessian_rows}\n")
+                f.write(f"bending_hessian_cols={bending_hessian_cols}\n")
+                f.write(f"bending_hessian_values={bending_hessian_values}\n")
         
         return bending_hessian_rows, bending_hessian_cols, bending_hessian_values
 
