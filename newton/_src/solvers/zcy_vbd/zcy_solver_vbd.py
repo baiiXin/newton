@@ -2031,9 +2031,9 @@ def zcy_apply_conservative_bound_truncation(
         accumulated_displacement = accumulated_displacement * (
             accumulated_displacement_norm_truncated / accumulated_displacement_norm
         )
-        return particle_pos_prev_collision_detection + accumulated_displacement, accumulated_displacement
+        return particle_pos_prev_collision_detection + accumulated_displacement
     else:
-        return pos_new, accumulated_displacement
+        return pos_new
 # zcy
 
 
@@ -3995,10 +3995,9 @@ def zcy_accumulate_bending_energy(
 
 # zcy_update
 @wp.kernel
-def zcy_update_position_line_search(
-    pos: wp.array(dtype=wp.vec3), 
+def zcy_line_search_truncation(
     dx: wp.array(dtype=wp.vec3), 
-    alpha: float,
+    pos: wp.array(dtype=wp.vec3), 
     all_particle_flag: wp.array(dtype=wp.int32),
     pos_prev_collision_detection: wp.array(dtype=wp.vec3),
     particle_conservative_bounds: wp.array(dtype=float),
@@ -4009,14 +4008,30 @@ def zcy_update_position_line_search(
         return
 
     offset = all_particle_flag[particle_index]
-    pos_before_truncation = pos[particle_index] + alpha * dx[particle_index-offset]
+    pos_before_truncation = pos[particle_index] + dx[particle_index-offset]
     
-    pos_local, dx_local = zcy_apply_conservative_bound_truncation(
+    pos_truncated = zcy_apply_conservative_bound_truncation(
         particle_index, pos_before_truncation, pos_prev_collision_detection, particle_conservative_bounds
     )
 
-    pos[particle_index] = pos_local
-    dx[particle_index-offset] = dx_local
+    dx[particle_index-offset] = pos_truncated - pos[particle_index]
+
+
+@wp.kernel
+def zcy_line_search_test_position(
+    pos_test: wp.array(dtype=wp.vec3), 
+    dx: wp.array(dtype=wp.vec3), 
+    alpha: float,
+    all_particle_flag: wp.array(dtype=wp.int32),
+):
+    particle_index = wp.tid()
+
+    if all_particle_flag[particle_index] == -1:
+        return
+
+    offset = all_particle_flag[particle_index]
+    pos_test[particle_index] += alpha * dx[particle_index-offset]
+
 
 @wp.kernel
 def zcy_update_velocity(
@@ -4348,16 +4363,16 @@ class zcy_SolverVBD(SolverBase):
         
         # debug_information_log
         if self.DeBUG['DeBUG']:
-            log_residual_path = "run_twist_cloth_residual_log.txt"
+            log_residual_path = f"run_{self.DeBUG['record_name']}_residual_log.txt"
             with open(log_residual_path, "a", encoding="utf-8") as f:
                     f.write(f'--- time_step: {time_step} ---\n')
                     f.write(f'forward: residual_norm_forward: {residual_norm_forward}, energy_forward: {energy_forward}\n')
 
             if self.DeBUG['max_information']:
-                log_warning_path = "run_twist_cloth_warning_log.txt"
+                log_warning_path = f"run_{self.DeBUG['record_name']}_warning_log.txt"
 
             if self.DeBUG['record_hessian']:
-                path_hessian = "run_hessian_isbeing_log.txt"
+                path_hessian = f"run_{self.DeBUG['record_name']}_hessian_isbeing_log.txt"
                 with open(path_hessian, "a") as f:
                         f.write(f'\n--- time_step: {time_step} ---\n')
 
@@ -4422,31 +4437,40 @@ class zcy_SolverVBD(SolverBase):
                     f.write(f'[cond, is_symmetric, is_spd, eig_min, eig_max]\n')
                     f.write(str([cond, is_symmetric, is_spd, eig_min, eig_max]) + "\n\n")
 
-        
+
             ### line search
             # region: line search
+            # 0.1.initialization
+            # truncation dx
+            wp.launch(
+                kernel=zcy_line_search_truncation,
+                inputs=[dx, 
+                        # input
+                        pos_warp, 
+                        self.all_particle_flag, 
+                        self.pos_prev_collision_detection, 
+                        self.particle_conservative_bounds, 
+                        ], 
+                dim=self.num_particle,
+                device=self.device,
+            )
+
             # 0.parameters
             c1 = 1e-3
-            alpha = 1
+            alpha = 1.0
             gamma = 0.5
-            pos_warp_test_alpha = wp.zeros_like(pos_warp)
-            dx_alpha = wp.zeros_like(dx)
-
             # 0.line search 
-            for _line_search_times in range(self.DeBUG['line_search_max_step']):
-                # assign
+            for _line_search_times in range(self.DeBUG['line_search_max_step']):  
+                # test alpha position
+                pos_warp_test_alpha = wp.zeros_like(pos_warp)
                 pos_warp_test_alpha.assign(pos_warp)
-                dx_alpha.assign(dx)
-
-                # update position and truncation
                 wp.launch(
-                    kernel=zcy_update_position_line_search,
+                    kernel=zcy_line_search_test_position,
                     inputs=[pos_warp_test_alpha, 
-                            dx_alpha, 
+                            # input
+                            dx,
                             alpha,
                             self.all_particle_flag, 
-                            self.pos_prev_collision_detection, 
-                            self.particle_conservative_bounds,
                             ], 
                     dim=self.num_particle,
                     device=self.device,
@@ -4463,7 +4487,6 @@ class zcy_SolverVBD(SolverBase):
                 incremental_energy = self.zcy_compute_incremental_energy(residual0, dx, alpha, c1)
                 # 1.4.check armijo condition
                 residual1, residual_norm1 = self.zcy_compute_residual(pos_warp_test_alpha, pos_prev_warp, vel_warp, dt, mass)
-
 
                 if energy1.numpy().item() < energy0.numpy().item() + incremental_energy.numpy().item() and residual_norm1 < residual_norm0 + 1e-6 :
                     break
@@ -4521,12 +4544,10 @@ class zcy_SolverVBD(SolverBase):
             residual0, residual1 = residual1, residual0
 
             pos_warp, pos_warp_test_alpha = pos_warp_test_alpha, pos_warp
-            dx, dx_alpha = dx_alpha, dx
             
             print('residual_norm:', residual_norm0, '|energy:', energy0, '|incremental_energy:', incremental_energy, '|alpha:', alpha)
             
             if self.DeBUG['DeBUG']:
-                log_residual_path = "run_twist_cloth_residual_log.txt"
                 with open(log_residual_path, "a", encoding="utf-8") as f:
                         # 写入当前迭代信息
                         f.write(f'residual_norm: {residual_norm0} |energy: {energy0} |incremental_energy: {incremental_energy} |alpha: {alpha}\n\n')
@@ -4993,7 +5014,7 @@ class zcy_SolverVBD(SolverBase):
         #print(f"\nvt_contact_hessian_values={vt_contact_hessian_values}, vt_contact_hessian_values.shape={vt_contact_hessian_values.shape}")
 
         if self.DeBUG['DeBUG'] & self.DeBUG['record_hessian']:
-            path_hessian = "run_hessian_isbeing_log.txt"
+            path_hessian = f"run_{self.DeBUG['record_name']}_hessian_isbeing_log.txt"
             contact_ee_hessian = np.abs(edge_contact_hessian_values.numpy()).max()
             contact_ee_residual = np.abs(edge_contact_forces.numpy()).max()
             contact_vt_hessian = np.abs(vt_contact_hessian_values.numpy()).max()
@@ -5090,7 +5111,7 @@ class zcy_SolverVBD(SolverBase):
             self.spring_hessian_rows, self.spring_hessian_cols, self.spring_hessian_values)
 
         if self.DeBUG['DeBUG'] & self.DeBUG['record_hessian']:
-            path_hessian = "run_hessian_isbeing_log.txt"
+            path_hessian = f"run_{self.DeBUG['record_name']}_hessian_isbeing_log.txt"
             spring_hessian = np.abs(spring_hessian_values.numpy()).max()
             spring_residual = np.abs(spring_forces.numpy()).max()
 
@@ -5151,7 +5172,7 @@ class zcy_SolverVBD(SolverBase):
         #print(f"\nbending_hessian_cols={bending_hessian_cols}, bending_hessian_cols.shape={bending_hessian_cols.shape}")
         #print(f"\nbending_hessian_values={bending_hessian_values}, bending_hessian_values.shape={bending_hessian_values.shape}")
         if self.DeBUG['DeBUG'] & self.DeBUG['record_hessian']:
-            path_hessian = "run_hessian_isbeing_log.txt"
+            path_hessian = f"run_{self.DeBUG['record_name']}_hessian_isbeing_log.txt"
             bending_hessian = np.abs(bending_hessian_values.numpy()).max()
             bending_residual = np.abs(bending_forces.numpy()).max()
 
