@@ -4363,16 +4363,16 @@ class zcy_SolverVBD(SolverBase):
         
         # debug_information_log
         if self.DeBUG['DeBUG']:
-            log_residual_path = f"run_{self.DeBUG['record_name']}_residual_log.txt"
+            log_residual_path = f"running_log/run_{self.DeBUG['record_name']}_residual_log.txt"
             with open(log_residual_path, "a", encoding="utf-8") as f:
                     f.write(f'--- time_step: {time_step} ---\n')
                     f.write(f'forward: residual_norm_forward: {residual_norm_forward}, energy_forward: {energy_forward}\n')
 
             if self.DeBUG['max_information']:
-                log_warning_path = f"run_{self.DeBUG['record_name']}_warning_log.txt"
+                log_warning_path = f"running_log/run_{self.DeBUG['record_name']}_warning_log.txt"
 
             if self.DeBUG['record_hessian']:
-                path_hessian = f"run_{self.DeBUG['record_name']}_hessian_isbeing_log.txt"
+                path_hessian = f"running_log/run_{self.DeBUG['record_name']}_hessian_isbeing_log.txt"
                 with open(path_hessian, "a") as f:
                         f.write(f'\n--- time_step: {time_step} ---\n')
 
@@ -5014,7 +5014,7 @@ class zcy_SolverVBD(SolverBase):
         #print(f"\nvt_contact_hessian_values={vt_contact_hessian_values}, vt_contact_hessian_values.shape={vt_contact_hessian_values.shape}")
 
         if self.DeBUG['DeBUG'] & self.DeBUG['record_hessian']:
-            path_hessian = f"run_{self.DeBUG['record_name']}_hessian_isbeing_log.txt"
+            path_hessian = f"running_log/run_{self.DeBUG['record_name']}_hessian_isbeing_log.txt"
             contact_ee_hessian = np.abs(edge_contact_hessian_values.numpy()).max()
             contact_ee_residual = np.abs(edge_contact_forces.numpy()).max()
             contact_vt_hessian = np.abs(vt_contact_hessian_values.numpy()).max()
@@ -5111,7 +5111,7 @@ class zcy_SolverVBD(SolverBase):
             self.spring_hessian_rows, self.spring_hessian_cols, self.spring_hessian_values)
 
         if self.DeBUG['DeBUG'] & self.DeBUG['record_hessian']:
-            path_hessian = f"run_{self.DeBUG['record_name']}_hessian_isbeing_log.txt"
+            path_hessian = f"running_log/run_{self.DeBUG['record_name']}_hessian_isbeing_log.txt"
             spring_hessian = np.abs(spring_hessian_values.numpy()).max()
             spring_residual = np.abs(spring_forces.numpy()).max()
 
@@ -5172,7 +5172,7 @@ class zcy_SolverVBD(SolverBase):
         #print(f"\nbending_hessian_cols={bending_hessian_cols}, bending_hessian_cols.shape={bending_hessian_cols.shape}")
         #print(f"\nbending_hessian_values={bending_hessian_values}, bending_hessian_values.shape={bending_hessian_values.shape}")
         if self.DeBUG['DeBUG'] & self.DeBUG['record_hessian']:
-            path_hessian = f"run_{self.DeBUG['record_name']}_hessian_isbeing_log.txt"
+            path_hessian = f"running_log/run_{self.DeBUG['record_name']}_hessian_isbeing_log.txt"
             bending_hessian = np.abs(bending_hessian_values.numpy()).max()
             bending_residual = np.abs(bending_forces.numpy()).max()
 
