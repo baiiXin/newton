@@ -4455,6 +4455,10 @@ class zcy_SolverVBD(SolverBase):
                 device=self.device,
             )
 
+            if self.DeBUG['DeBUG']:
+                dx_debug = dx.numpy()
+                pos_debug = pos_warp.numpy()
+
             # 0.parameters
             c1 = 1e-3
             alpha = 1.0
@@ -4475,6 +4479,10 @@ class zcy_SolverVBD(SolverBase):
                     dim=self.num_particle,
                     device=self.device,
                 )
+
+                if self.DeBUG['DeBUG']:
+                    dx_debug = dx.numpy()
+                    pos_debug0 = pos_warp_test_alpha.numpy()
 
                 # collision detection
                 self.trimesh_collision_detector.refit(pos_warp_test_alpha)
@@ -4543,7 +4551,11 @@ class zcy_SolverVBD(SolverBase):
             residual_norm0, residual_norm1 = residual_norm1, residual_norm0
             residual0, residual1 = residual1, residual0
 
-            pos_warp, pos_warp_test_alpha = pos_warp_test_alpha, pos_warp
+            # 1.5.update pos_warp
+            pos_warp.assign(pos_warp_test_alpha)
+
+            if self.DeBUG['DeBUG']:
+                    pos_debug1 = pos_warp.numpy()
             
             print('residual_norm:', residual_norm0, '|energy:', energy0, '|incremental_energy:', incremental_energy, '|alpha:', alpha)
             
