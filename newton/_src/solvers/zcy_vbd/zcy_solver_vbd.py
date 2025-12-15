@@ -4349,7 +4349,7 @@ class zcy_SolverVBD(SolverBase):
         self.zcy_collision_detection_penetration_free(pos_prev_warp)
         
         # forward
-        self.zcy_forward_step_penetration_free(pos_warp, pos_prev_warp, vel_warp, dt, forward_type=1)
+        self.zcy_forward_step_penetration_free(pos_warp, pos_prev_warp, vel_warp, dt, forward_type=self.DeBUG['forward_type'])
 
         # after initialization, we need new collision detection to update the bounds
         # collision detection
@@ -4488,7 +4488,7 @@ class zcy_SolverVBD(SolverBase):
                 # 1.4.check armijo condition
                 residual1, residual_norm1 = self.zcy_compute_residual(pos_warp_test_alpha, pos_prev_warp, vel_warp, dt, mass)
 
-                if energy1.numpy().item() < energy0.numpy().item() + incremental_energy.numpy().item() and residual_norm1 < residual_norm0 + 1e-6 :
+                if energy1.numpy().item() < energy0.numpy().item() + incremental_energy.numpy().item() :#and residual_norm1 < residual_norm0 + 1e-6 :
                     break
                 else:
                     alpha *= gamma
@@ -4552,7 +4552,7 @@ class zcy_SolverVBD(SolverBase):
                         # 写入当前迭代信息
                         f.write(f'residual_norm: {residual_norm0} |energy: {energy0} |incremental_energy: {incremental_energy} |alpha: {alpha}\n\n')
                 
-            if residual_norm0 < tolerance or residual_norm0/residual_norm_forward < 1e-4 :
+            if residual_norm0 < tolerance or residual_norm0/residual_norm_forward < 1e-3 :
                 break
 
             # region: iteration information 
