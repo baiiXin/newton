@@ -499,7 +499,7 @@ def evaluate_body_particle_contact(
 
 
 @wp.func
-def evaluate_self_contact_force_norm(dis: float, collision_radius: float, k: float):
+def evaluate_self_contact_force_norm(dis: float, collision_radius: float, k: float, barrier_threshold: float):
     # Adjust distance and calculate penetration depth
 
     penetration_depth = collision_radius - dis
@@ -510,7 +510,7 @@ def evaluate_self_contact_force_norm(dis: float, collision_radius: float, k: flo
 
     # C2 continuity calculation
     tau = collision_radius * 0.5
-    if tau > dis > 0.0:
+    if tau > dis > barrier_threshold:
         k2 = 0.5 * tau * tau * k
         dEdD = -k2 / dis
         d2E_dDdD = k2 / (dis * dis)
@@ -535,274 +535,6 @@ def damp_collision(
         return damping_force, damping_hessian
     else:
         return wp.vec3(0.0), wp.mat33(0.0)
-
-
-@wp.func
-def evaluate_edge_edge_contact(
-    v: int,
-    v_order: int,
-    e1: int,
-    e2: int,
-    pos: wp.array(dtype=wp.vec3),
-    pos_prev: wp.array(dtype=wp.vec3),
-    edge_indices: wp.array(dtype=wp.int32, ndim=2),
-    collision_radius: float,
-    collision_stiffness: float,
-    collision_damping: float,
-    friction_coefficient: float,
-    friction_epsilon: float,
-    dt: float,
-    edge_edge_parallel_epsilon: float,
-):
-    r"""
-    Returns the edge-edge contact force and hessian, including the friction force.
-    Args:
-        v:
-        v_order: \in {0, 1, 2, 3}, 0, 1 is vertex 0, 1 of e1, 2,3 is vertex 0, 1 of e2
-        e0
-        e1
-        pos
-        pos_prev,
-        edge_indices
-        collision_radius
-        collision_stiffness
-        dt
-        edge_edge_parallel_epsilon: threshold to determine whether 2 edges are parallel
-    """
-    e1_v1 = edge_indices[e1, 2]
-    e1_v2 = edge_indices[e1, 3]
-
-    e1_v1_pos = pos[e1_v1]
-    e1_v2_pos = pos[e1_v2]
-
-    e2_v1 = edge_indices[e2, 2]
-    e2_v2 = edge_indices[e2, 3]
-
-    e2_v1_pos = pos[e2_v1]
-    e2_v2_pos = pos[e2_v2]
-
-    st = wp.closest_point_edge_edge(e1_v1_pos, e1_v2_pos, e2_v1_pos, e2_v2_pos, edge_edge_parallel_epsilon)
-    s = st[0]
-    t = st[1]
-    e1_vec = e1_v2_pos - e1_v1_pos
-    e2_vec = e2_v2_pos - e2_v1_pos
-    c1 = e1_v1_pos + e1_vec * s
-    c2 = e2_v1_pos + e2_vec * t
-
-    # c1, c2, s, t = closest_point_edge_edge_2(e1_v1_pos, e1_v2_pos, e2_v1_pos, e2_v2_pos)
-
-    diff = c1 - c2
-    dis = st[2]
-    collision_normal = diff / dis
-
-    if dis < collision_radius:
-        bs = wp.vec4(1.0 - s, s, -1.0 + t, -t)
-        v_bary = bs[v_order]
-
-        dEdD, d2E_dDdD = evaluate_self_contact_force_norm(dis, collision_radius, collision_stiffness)
-
-        collision_force = -dEdD * v_bary * collision_normal
-        collision_hessian = d2E_dDdD * v_bary * v_bary * wp.outer(collision_normal, collision_normal)
-
-        # friction
-        c1_prev = pos_prev[e1_v1] + (pos_prev[e1_v2] - pos_prev[e1_v1]) * s
-        c2_prev = pos_prev[e2_v1] + (pos_prev[e2_v2] - pos_prev[e2_v1]) * t
-
-        dx = (c1 - c1_prev) - (c2 - c2_prev)
-        axis_1, axis_2 = build_orthonormal_basis(collision_normal)
-
-        T = mat32(
-            axis_1[0],
-            axis_2[0],
-            axis_1[1],
-            axis_2[1],
-            axis_1[2],
-            axis_2[2],
-        )
-
-        u = wp.transpose(T) * dx
-        eps_U = friction_epsilon * dt
-
-        # fmt: off
-        if wp.static("contact_force_hessian_ee" in VBD_DEBUG_PRINTING_OPTIONS):
-            wp.printf(
-                "    collision force:\n    %f %f %f,\n    collision hessian:\n    %f %f %f,\n    %f %f %f,\n    %f %f %f\n",
-                collision_force[0], collision_force[1], collision_force[2], collision_hessian[0, 0], collision_hessian[0, 1], collision_hessian[0, 2], collision_hessian[1, 0], collision_hessian[1, 1], collision_hessian[1, 2], collision_hessian[2, 0], collision_hessian[2, 1], collision_hessian[2, 2],
-            )
-        # fmt: on
-
-        friction_force, friction_hessian = compute_friction(friction_coefficient, -dEdD, T, u, eps_U)
-        friction_force = friction_force * v_bary
-        friction_hessian = friction_hessian * v_bary * v_bary
-
-        # # fmt: off
-        # if wp.static("contact_force_hessian_ee" in VBD_DEBUG_PRINTING_OPTIONS):
-        #     wp.printf(
-        #         "    friction force:\n    %f %f %f,\n    friction hessian:\n    %f %f %f,\n    %f %f %f,\n    %f %f %f\n",
-        #         friction_force[0], friction_force[1], friction_force[2], friction_hessian[0, 0], friction_hessian[0, 1], friction_hessian[0, 2], friction_hessian[1, 0], friction_hessian[1, 1], friction_hessian[1, 2], friction_hessian[2, 0], friction_hessian[2, 1], friction_hessian[2, 2],
-        #     )
-        # # fmt: on
-
-        if v_order == 0:
-            displacement = pos_prev[e1_v1] - e1_v1_pos
-        elif v_order == 1:
-            displacement = pos_prev[e1_v2] - e1_v2_pos
-        elif v_order == 2:
-            displacement = pos_prev[e2_v1] - e2_v1_pos
-        else:
-            displacement = pos_prev[e2_v2] - e2_v2_pos
-
-        collision_normal_sign = wp.vec4(1.0, 1.0, -1.0, -1.0)
-        if wp.dot(displacement, collision_normal * collision_normal_sign[v_order]) > 0:
-            damping_hessian = (collision_damping / dt) * collision_hessian
-            collision_hessian = collision_hessian + damping_hessian
-            collision_force = collision_force + damping_hessian * displacement
-
-        collision_force = collision_force + friction_force
-        collision_hessian = collision_hessian + friction_hessian
-    else:
-        collision_force = wp.vec3(0.0, 0.0, 0.0)
-        collision_hessian = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-
-    return collision_force, collision_hessian
-
-
-@wp.func
-def evaluate_edge_edge_contact_2_vertices(
-    e1: int,
-    e2: int,
-    pos: wp.array(dtype=wp.vec3),
-    pos_prev: wp.array(dtype=wp.vec3),
-    edge_indices: wp.array(dtype=wp.int32, ndim=2),
-    collision_radius: float,
-    collision_stiffness: float,
-    collision_damping: float,
-    friction_coefficient: float,
-    friction_epsilon: float,
-    dt: float,
-    edge_edge_parallel_epsilon: float,
-):
-    r"""
-    Returns the edge-edge contact force and hessian, including the friction force.
-    Args:
-        v:
-        v_order: \in {0, 1, 2, 3}, 0, 1 is vertex 0, 1 of e1, 2,3 is vertex 0, 1 of e2
-        e0
-        e1
-        pos
-        edge_indices
-        collision_radius
-        collision_stiffness
-        dt
-    """
-    e1_v1 = edge_indices[e1, 2]
-    e1_v2 = edge_indices[e1, 3]
-
-    e1_v1_pos = pos[e1_v1]
-    e1_v2_pos = pos[e1_v2]
-
-    e2_v1 = edge_indices[e2, 2]
-    e2_v2 = edge_indices[e2, 3]
-
-    e2_v1_pos = pos[e2_v1]
-    e2_v2_pos = pos[e2_v2]
-
-    st = wp.closest_point_edge_edge(e1_v1_pos, e1_v2_pos, e2_v1_pos, e2_v2_pos, edge_edge_parallel_epsilon)
-    s = st[0]
-    t = st[1]
-    e1_vec = e1_v2_pos - e1_v1_pos
-    e2_vec = e2_v2_pos - e2_v1_pos
-    c1 = e1_v1_pos + e1_vec * s
-    c2 = e2_v1_pos + e2_vec * t
-
-    # c1, c2, s, t = closest_point_edge_edge_2(e1_v1_pos, e1_v2_pos, e2_v1_pos, e2_v2_pos)
-
-    diff = c1 - c2
-    dis = st[2]
-    collision_normal = diff / dis
-
-    if 0.0 < dis < collision_radius:
-        bs = wp.vec4(1.0 - s, s, -1.0 + t, -t)
-
-        dEdD, d2E_dDdD = evaluate_self_contact_force_norm(dis, collision_radius, collision_stiffness)
-
-        collision_force = -dEdD * collision_normal
-        collision_hessian = d2E_dDdD * wp.outer(collision_normal, collision_normal)
-
-        # friction
-        c1_prev = pos_prev[e1_v1] + (pos_prev[e1_v2] - pos_prev[e1_v1]) * s
-        c2_prev = pos_prev[e2_v1] + (pos_prev[e2_v2] - pos_prev[e2_v1]) * t
-
-        dx = (c1 - c1_prev) - (c2 - c2_prev)
-        axis_1, axis_2 = build_orthonormal_basis(collision_normal)
-
-        T = mat32(
-            axis_1[0],
-            axis_2[0],
-            axis_1[1],
-            axis_2[1],
-            axis_1[2],
-            axis_2[2],
-        )
-
-        u = wp.transpose(T) * dx
-        eps_U = friction_epsilon * dt
-
-        # fmt: off
-        if wp.static("contact_force_hessian_ee" in VBD_DEBUG_PRINTING_OPTIONS):
-            wp.printf(
-                "    collision force:\n    %f %f %f,\n    collision hessian:\n    %f %f %f,\n    %f %f %f,\n    %f %f %f\n",
-                collision_force[0], collision_force[1], collision_force[2], collision_hessian[0, 0], collision_hessian[0, 1], collision_hessian[0, 2], collision_hessian[1, 0], collision_hessian[1, 1], collision_hessian[1, 2], collision_hessian[2, 0], collision_hessian[2, 1], collision_hessian[2, 2],
-            )
-        # fmt: on
-
-        friction_force, friction_hessian = compute_friction(friction_coefficient, -dEdD, T, u, eps_U)
-
-        # # fmt: off
-        # if wp.static("contact_force_hessian_ee" in VBD_DEBUG_PRINTING_OPTIONS):
-        #     wp.printf(
-        #         "    friction force:\n    %f %f %f,\n    friction hessian:\n    %f %f %f,\n    %f %f %f,\n    %f %f %f\n",
-        #         friction_force[0], friction_force[1], friction_force[2], friction_hessian[0, 0], friction_hessian[0, 1], friction_hessian[0, 2], friction_hessian[1, 0], friction_hessian[1, 1], friction_hessian[1, 2], friction_hessian[2, 0], friction_hessian[2, 1], friction_hessian[2, 2],
-        #     )
-        # # fmt: on
-
-        displacement_0 = pos_prev[e1_v1] - e1_v1_pos
-        displacement_1 = pos_prev[e1_v2] - e1_v2_pos
-
-        collision_force_0 = collision_force * bs[0]
-        collision_force_1 = collision_force * bs[1]
-
-        collision_hessian_0 = collision_hessian * bs[0] * bs[0]
-        collision_hessian_1 = collision_hessian * bs[1] * bs[1]
-
-        collision_normal_sign = wp.vec4(1.0, 1.0, -1.0, -1.0)
-        damping_force, damping_hessian = damp_collision(
-            displacement_0,
-            collision_normal * collision_normal_sign[0],
-            collision_hessian_0,
-            collision_damping,
-            dt,
-        )
-
-        collision_force_0 += damping_force + bs[0] * friction_force
-        collision_hessian_0 += damping_hessian + bs[0] * bs[0] * friction_hessian
-
-        damping_force, damping_hessian = damp_collision(
-            displacement_1,
-            collision_normal * collision_normal_sign[1],
-            collision_hessian_1,
-            collision_damping,
-            dt,
-        )
-        collision_force_1 += damping_force + bs[1] * friction_force
-        collision_hessian_1 += damping_hessian + bs[1] * bs[1] * friction_hessian
-
-        return True, collision_force_0, collision_force_1, collision_hessian_0, collision_hessian_1
-    else:
-        collision_force = wp.vec3(0.0, 0.0, 0.0)
-        collision_hessian = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-
-        return False, collision_force, collision_force, collision_hessian, collision_hessian
 
 # zcy
 # svd
@@ -1719,6 +1451,7 @@ def zcy_evaluate_edge_edge_contact_2_vertices(
     friction_coefficient: float,
     friction_epsilon: float,
     edge_edge_parallel_epsilon: float,
+    barrier_threshold: float,
 ):
     r"""
     Returns the edge-edge contact force and hessian with Rayleigh Damping.
@@ -1759,7 +1492,7 @@ def zcy_evaluate_edge_edge_contact_2_vertices(
         # Coefficients: [1-s, s, -1+t, -t]
         bs = wp.vec4(1.0 - s, s, -1.0 + t, -t)
 
-        dEdD, d2E_dDdD = evaluate_self_contact_force_norm(dis, collision_radius, collision_stiffness)
+        dEdD, d2E_dDdD = evaluate_self_contact_force_norm(dis, collision_radius, collision_stiffness, barrier_threshold)
 
         # 1. 基础弹性部分 (Core Elastic Force & Hessian)
         collision_force = -dEdD * collision_normal
@@ -1859,6 +1592,7 @@ def zcy_evaluate_vertex_triangle_collision_force_hessian_4_vertices(
     collision_damping: float,
     friction_coefficient: float,
     friction_epsilon: float,
+    barrier_threshold: float,
 ):
     # 获取三角形三个顶点的索引
     idx_a = tri_indices[tri, 0]
@@ -1884,7 +1618,7 @@ def zcy_evaluate_vertex_triangle_collision_force_hessian_4_vertices(
         # 对应梯度权重: Triangle Vertices (负权重), Point Vertex (正权重)
         bs = wp.vec4(-bary[0], -bary[1], -bary[2], 1.0)
 
-        dEdD, d2E_dDdD = evaluate_self_contact_force_norm(dis, collision_radius, collision_stiffness)
+        dEdD, d2E_dDdD = evaluate_self_contact_force_norm(dis, collision_radius, collision_stiffness, barrier_threshold)
 
         # 1. 基础弹性力和 Hessian (3x3 Core)
         collision_force = -dEdD * collision_normal
@@ -2020,13 +1754,14 @@ def zcy_apply_conservative_bound_truncation(
     pos_new: wp.vec3,
     pos_prev_collision_detection: wp.array(dtype=wp.vec3),
     particle_conservative_bounds: wp.array(dtype=float),
+    truncation_threshold: float,
 ):
     particle_pos_prev_collision_detection = pos_prev_collision_detection[v_index]
     accumulated_displacement = pos_new - particle_pos_prev_collision_detection
     conservative_bound = particle_conservative_bounds[v_index]
 
     accumulated_displacement_norm = wp.length(accumulated_displacement)
-    if accumulated_displacement_norm >= conservative_bound:
+    if accumulated_displacement_norm > conservative_bound and conservative_bound > truncation_threshold:
         accumulated_displacement_norm_truncated = conservative_bound
         accumulated_displacement = accumulated_displacement * (
             accumulated_displacement_norm_truncated / accumulated_displacement_norm
@@ -2035,245 +1770,6 @@ def zcy_apply_conservative_bound_truncation(
     else:
         return pos_new
 # zcy
-
-
-@wp.func
-def evaluate_vertex_triangle_collision_force_hessian(
-    v: int,
-    v_order: int,
-    tri: int,
-    pos: wp.array(dtype=wp.vec3),
-    pos_prev: wp.array(dtype=wp.vec3),
-    tri_indices: wp.array(dtype=wp.int32, ndim=2),
-    collision_radius: float,
-    collision_stiffness: float,
-    collision_damping: float,
-    friction_coefficient: float,
-    friction_epsilon: float,
-    dt: float,
-):
-    a = pos[tri_indices[tri, 0]]
-    b = pos[tri_indices[tri, 1]]
-    c = pos[tri_indices[tri, 2]]
-
-    p = pos[v]
-
-    closest_p, bary, feature_type = triangle_closest_point(a, b, c, p)
-
-    diff = p - closest_p
-    dis = wp.length(diff)
-    collision_normal = diff / dis
-
-    if dis < collision_radius:
-        bs = wp.vec4(-bary[0], -bary[1], -bary[2], 1.0)
-        v_bary = bs[v_order]
-
-        dEdD, d2E_dDdD = evaluate_self_contact_force_norm(dis, collision_radius, collision_stiffness)
-
-        collision_force = -dEdD * v_bary * collision_normal
-        collision_hessian = d2E_dDdD * v_bary * v_bary * wp.outer(collision_normal, collision_normal)
-
-        # friction force
-        dx_v = p - pos_prev[v]
-
-        closest_p_prev = (
-            bary[0] * pos_prev[tri_indices[tri, 0]]
-            + bary[1] * pos_prev[tri_indices[tri, 1]]
-            + bary[2] * pos_prev[tri_indices[tri, 2]]
-        )
-
-        dx = dx_v - (closest_p - closest_p_prev)
-
-        e0, e1 = build_orthonormal_basis(collision_normal)
-
-        T = mat32(e0[0], e1[0], e0[1], e1[1], e0[2], e1[2])
-
-        u = wp.transpose(T) * dx
-        eps_U = friction_epsilon * dt
-
-        friction_force, friction_hessian = compute_friction(friction_coefficient, -dEdD, T, u, eps_U)
-
-        # fmt: off
-        if wp.static("contact_force_hessian_vt" in VBD_DEBUG_PRINTING_OPTIONS):
-            wp.printf(
-                "v: %d dEdD: %f\nnormal force: %f %f %f\nfriction force: %f %f %f\n",
-                v,
-                dEdD,
-                collision_force[0], collision_force[1], collision_force[2], friction_force[0], friction_force[1], friction_force[2],
-            )
-        # fmt: on
-
-        if v_order == 0:
-            displacement = pos_prev[tri_indices[tri, 0]] - a
-        elif v_order == 1:
-            displacement = pos_prev[tri_indices[tri, 1]] - b
-        elif v_order == 2:
-            displacement = pos_prev[tri_indices[tri, 2]] - c
-        else:
-            displacement = pos_prev[v] - p
-
-        collision_normal_sign = wp.vec4(-1.0, -1.0, -1.0, 1.0)
-        if wp.dot(displacement, collision_normal * collision_normal_sign[v_order]) > 0:
-            damping_hessian = (collision_damping / dt) * collision_hessian
-            collision_hessian = collision_hessian + damping_hessian
-            collision_force = collision_force + damping_hessian * displacement
-
-        collision_force = collision_force + v_bary * friction_force
-        collision_hessian = collision_hessian + v_bary * v_bary * friction_hessian
-    else:
-        collision_force = wp.vec3(0.0, 0.0, 0.0)
-        collision_hessian = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-
-    return collision_force, collision_hessian
-
-
-@wp.func
-def evaluate_vertex_triangle_collision_force_hessian_4_vertices(
-    v: int,
-    tri: int,
-    pos: wp.array(dtype=wp.vec3),
-    pos_prev: wp.array(dtype=wp.vec3),
-    tri_indices: wp.array(dtype=wp.int32, ndim=2),
-    collision_radius: float,
-    collision_stiffness: float,
-    collision_damping: float,
-    friction_coefficient: float,
-    friction_epsilon: float,
-    dt: float,
-):
-    a = pos[tri_indices[tri, 0]]
-    b = pos[tri_indices[tri, 1]]
-    c = pos[tri_indices[tri, 2]]
-
-    p = pos[v]
-
-    closest_p, bary, feature_type = triangle_closest_point(a, b, c, p)
-
-    diff = p - closest_p
-    dis = wp.length(diff)
-    collision_normal = diff / dis
-
-    if 0.0 < dis < collision_radius:
-        bs = wp.vec4(-bary[0], -bary[1], -bary[2], 1.0)
-
-        dEdD, d2E_dDdD = evaluate_self_contact_force_norm(dis, collision_radius, collision_stiffness)
-
-        collision_force = -dEdD * collision_normal
-        collision_hessian = d2E_dDdD * wp.outer(collision_normal, collision_normal)
-
-        # friction force
-        dx_v = p - pos_prev[v]
-
-        closest_p_prev = (
-            bary[0] * pos_prev[tri_indices[tri, 0]]
-            + bary[1] * pos_prev[tri_indices[tri, 1]]
-            + bary[2] * pos_prev[tri_indices[tri, 2]]
-        )
-
-        dx = dx_v - (closest_p - closest_p_prev)
-
-        e0, e1 = build_orthonormal_basis(collision_normal)
-
-        T = mat32(e0[0], e1[0], e0[1], e1[1], e0[2], e1[2])
-
-        u = wp.transpose(T) * dx
-        eps_U = friction_epsilon * dt
-
-        friction_force, friction_hessian = compute_friction(friction_coefficient, -dEdD, T, u, eps_U)
-
-        # fmt: off
-        if wp.static("contact_force_hessian_vt" in VBD_DEBUG_PRINTING_OPTIONS):
-            wp.printf(
-                "v: %d dEdD: %f\nnormal force: %f %f %f\nfriction force: %f %f %f\n",
-                v,
-                dEdD,
-                collision_force[0], collision_force[1], collision_force[2], friction_force[0], friction_force[1],
-                friction_force[2],
-            )
-        # fmt: on
-
-        displacement_0 = pos_prev[tri_indices[tri, 0]] - a
-        displacement_1 = pos_prev[tri_indices[tri, 1]] - b
-        displacement_2 = pos_prev[tri_indices[tri, 2]] - c
-        displacement_3 = pos_prev[v] - p
-
-        collision_force_0 = collision_force * bs[0]
-        collision_force_1 = collision_force * bs[1]
-        collision_force_2 = collision_force * bs[2]
-        collision_force_3 = collision_force * bs[3]
-
-        collision_hessian_0 = collision_hessian * bs[0] * bs[0]
-        collision_hessian_1 = collision_hessian * bs[1] * bs[1]
-        collision_hessian_2 = collision_hessian * bs[2] * bs[2]
-        collision_hessian_3 = collision_hessian * bs[3] * bs[3]
-
-        collision_normal_sign = wp.vec4(-1.0, -1.0, -1.0, 1.0)
-        damping_force, damping_hessian = damp_collision(
-            displacement_0,
-            collision_normal * collision_normal_sign[0],
-            collision_hessian_0,
-            collision_damping,
-            dt,
-        )
-
-        collision_force_0 += damping_force + bs[0] * friction_force
-        collision_hessian_0 += damping_hessian + bs[0] * bs[0] * friction_hessian
-
-        damping_force, damping_hessian = damp_collision(
-            displacement_1,
-            collision_normal * collision_normal_sign[1],
-            collision_hessian_1,
-            collision_damping,
-            dt,
-        )
-        collision_force_1 += damping_force + bs[1] * friction_force
-        collision_hessian_1 += damping_hessian + bs[1] * bs[1] * friction_hessian
-
-        damping_force, damping_hessian = damp_collision(
-            displacement_2,
-            collision_normal * collision_normal_sign[2],
-            collision_hessian_2,
-            collision_damping,
-            dt,
-        )
-        collision_force_2 += damping_force + bs[2] * friction_force
-        collision_hessian_2 += damping_hessian + bs[2] * bs[2] * friction_hessian
-
-        damping_force, damping_hessian = damp_collision(
-            displacement_3,
-            collision_normal * collision_normal_sign[3],
-            collision_hessian_3,
-            collision_damping,
-            dt,
-        )
-        collision_force_3 += damping_force + bs[3] * friction_force
-        collision_hessian_3 += damping_hessian + bs[3] * bs[3] * friction_hessian
-        return (
-            True,
-            collision_force_0,
-            collision_force_1,
-            collision_force_2,
-            collision_force_3,
-            collision_hessian_0,
-            collision_hessian_1,
-            collision_hessian_2,
-            collision_hessian_3,
-        )
-    else:
-        collision_force = wp.vec3(0.0, 0.0, 0.0)
-        collision_hessian = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-
-        return (
-            False,
-            collision_force,
-            collision_force,
-            collision_force,
-            collision_force,
-            collision_hessian,
-            collision_hessian,
-            collision_hessian,
-            collision_hessian,
-        )
 
 
 @wp.func
@@ -2331,35 +1827,6 @@ def forward_step(
     vel_new = vel[particle] + (gravity + external_force[particle] * inv_mass[particle]) * dt
     pos[particle] = pos[particle] + vel_new * dt
     inertia[particle] = pos[particle]
-
-
-@wp.kernel
-def forward_step_penetration_free(
-    dt: float,
-    gravity: wp.vec3,
-    pos_prev: wp.array(dtype=wp.vec3),
-    pos: wp.array(dtype=wp.vec3),
-    vel: wp.array(dtype=wp.vec3),
-    inv_mass: wp.array(dtype=float),
-    external_force: wp.array(dtype=wp.vec3),
-    particle_flags: wp.array(dtype=wp.int32),
-    pos_prev_collision_detection: wp.array(dtype=wp.vec3),
-    particle_conservative_bounds: wp.array(dtype=float),
-    inertia: wp.array(dtype=wp.vec3),
-):
-    particle_index = wp.tid()
-
-    pos_prev[particle_index] = pos[particle_index]
-    if not particle_flags[particle_index] & ParticleFlags.ACTIVE:
-        inertia[particle_index] = pos_prev[particle_index]
-        return
-    vel_new = vel[particle_index] + (gravity + external_force[particle_index] * inv_mass[particle_index]) * dt
-    pos_inertia = pos[particle_index] + vel_new * dt
-    inertia[particle_index] = pos_inertia
-
-    pos[particle_index] = apply_conservative_bound_truncation(
-        particle_index, pos_inertia, pos_prev_collision_detection, particle_conservative_bounds
-    )
 
 
 @wp.kernel
@@ -2429,55 +1896,6 @@ def validate_conservative_bound(
         )
 
 
-@wp.func
-def apply_conservative_bound_truncation(
-    v_index: wp.int32,
-    pos_new: wp.vec3,
-    pos_prev_collision_detection: wp.array(dtype=wp.vec3),
-    particle_conservative_bounds: wp.array(dtype=float),
-):
-    particle_pos_prev_collision_detection = pos_prev_collision_detection[v_index]
-    accumulated_displacement = pos_new - particle_pos_prev_collision_detection
-    conservative_bound = particle_conservative_bounds[v_index]
-
-    accumulated_displacement_norm = wp.length(accumulated_displacement)
-    if accumulated_displacement_norm >= conservative_bound:
-        accumulated_displacement_norm_truncated = conservative_bound
-        accumulated_displacement = accumulated_displacement * (
-            accumulated_displacement_norm_truncated / accumulated_displacement_norm
-        )
-        if 0:#v_index == 3:
-            dx_truncated =wp.length(accumulated_displacement * (
-                accumulated_displacement_norm_truncated / accumulated_displacement_norm
-            ))
-            wp.printf(
-                "\nVertex %d:\n dx %.10e; bound %.10e; ratio(b/dx) %.10e;\n dx_truncated %.10e\n",
-                v_index,
-                accumulated_displacement_norm,
-                conservative_bound,
-                accumulated_displacement_norm_truncated / accumulated_displacement_norm,
-                dx_truncated,
-            )
-            wp.printf(
-                "pos_old+dis=pos_new: \n pos_old [%.10e,%.10e,%.10e];\n dis_pls [%.10e,%.10e,%.10e];\n pos_new [%.10e,%.10e,%.10e];\n",
-                particle_pos_prev_collision_detection[0],
-                particle_pos_prev_collision_detection[1],
-                particle_pos_prev_collision_detection[2],
-                accumulated_displacement[0],
-                accumulated_displacement[1],
-                accumulated_displacement[2],
-                particle_pos_prev_collision_detection[0] + accumulated_displacement[0],
-                particle_pos_prev_collision_detection[1] + accumulated_displacement[1],
-                particle_pos_prev_collision_detection[2] + accumulated_displacement[2],
-            )
-        return particle_pos_prev_collision_detection + accumulated_displacement
-    #elif conservative_bound < 1e-6:
-    #    return particle_pos_prev_collision_detection
-    else:
-        return pos_new
-
-
-
 @wp.kernel
 def copy_particle_positions_back(
     particle_ids_in_color: wp.array(dtype=wp.int32),
@@ -2522,196 +1940,6 @@ def convert_body_particle_contact_data_kernel(
         body_particle_contact_buffer[offset + contact_counter] = contact_index
 
 
-@wp.kernel
-def accumulate_contact_force_and_hessian(
-    # inputs
-    dt: float,
-    current_color: int,
-    pos_prev: wp.array(dtype=wp.vec3),
-    pos: wp.array(dtype=wp.vec3),
-    particle_colors: wp.array(dtype=int),
-    tri_indices: wp.array(dtype=wp.int32, ndim=2),
-    edge_indices: wp.array(dtype=wp.int32, ndim=2),
-    # self contact
-    collision_info_array: wp.array(dtype=TriMeshCollisionInfo),
-    collision_radius: float,
-    soft_contact_ke: float,
-    soft_contact_kd: float,
-    friction_mu: float,
-    friction_epsilon: float,
-    edge_edge_parallel_epsilon: float,
-    # body-particle contact
-    particle_radius: wp.array(dtype=float),
-    soft_contact_particle: wp.array(dtype=int),
-    contact_count: wp.array(dtype=int),
-    contact_max: int,
-    shape_material_mu: wp.array(dtype=float),
-    shape_body: wp.array(dtype=int),
-    body_q: wp.array(dtype=wp.transform),
-    body_q_prev: wp.array(dtype=wp.transform),
-    body_qd: wp.array(dtype=wp.spatial_vector),
-    body_com: wp.array(dtype=wp.vec3),
-    contact_shape: wp.array(dtype=int),
-    contact_body_pos: wp.array(dtype=wp.vec3),
-    contact_body_vel: wp.array(dtype=wp.vec3),
-    contact_normal: wp.array(dtype=wp.vec3),
-    # outputs: particle force and hessian
-    particle_forces: wp.array(dtype=wp.vec3),
-    particle_hessians: wp.array(dtype=wp.mat33),
-):
-    t_id = wp.tid()
-    collision_info = collision_info_array[0]
-
-    primitive_id = t_id // NUM_THREADS_PER_COLLISION_PRIMITIVE
-    t_id_current_primitive = t_id % NUM_THREADS_PER_COLLISION_PRIMITIVE
-
-    # process edge-edge collisions
-    if primitive_id < collision_info.edge_colliding_edges_buffer_sizes.shape[0]:
-        e1_idx = primitive_id
-
-        collision_buffer_counter = t_id_current_primitive
-        collision_buffer_offset = collision_info.edge_colliding_edges_offsets[primitive_id]
-        while collision_buffer_counter < collision_info.edge_colliding_edges_buffer_sizes[primitive_id]:
-            e2_idx = collision_info.edge_colliding_edges[2 * (collision_buffer_offset + collision_buffer_counter) + 1]
-
-            if e1_idx != -1 and e2_idx != -1:
-                e1_v1 = edge_indices[e1_idx, 2]
-                e1_v2 = edge_indices[e1_idx, 3]
-
-                c_e1_v1 = particle_colors[e1_v1]
-                c_e1_v2 = particle_colors[e1_v2]
-                if c_e1_v1 == current_color or c_e1_v2 == current_color:
-                    has_contact, collision_force_0, collision_force_1, collision_hessian_0, collision_hessian_1 = (
-                        evaluate_edge_edge_contact_2_vertices(
-                            e1_idx,
-                            e2_idx,
-                            pos,
-                            pos_prev,
-                            edge_indices,
-                            collision_radius,
-                            soft_contact_ke,
-                            soft_contact_kd,
-                            friction_mu,
-                            friction_epsilon,
-                            dt,
-                            edge_edge_parallel_epsilon,
-                        )
-                    )
-
-                    if has_contact:
-                        # here we only handle the e1 side, because e2 will also detection this contact and add force and hessian on its own
-                        if c_e1_v1 == current_color:
-                            wp.atomic_add(particle_forces, e1_v1, collision_force_0)
-                            wp.atomic_add(particle_hessians, e1_v1, collision_hessian_0)
-                        if c_e1_v2 == current_color:
-                            wp.atomic_add(particle_forces, e1_v2, collision_force_1)
-                            wp.atomic_add(particle_hessians, e1_v2, collision_hessian_1)
-            collision_buffer_counter += NUM_THREADS_PER_COLLISION_PRIMITIVE
-
-    # process vertex-triangle collisions
-    if primitive_id < collision_info.vertex_colliding_triangles_buffer_sizes.shape[0]:
-        particle_idx = primitive_id
-        collision_buffer_counter = t_id_current_primitive
-        collision_buffer_offset = collision_info.vertex_colliding_triangles_offsets[primitive_id]
-        while collision_buffer_counter < collision_info.vertex_colliding_triangles_buffer_sizes[primitive_id]:
-            tri_idx = collision_info.vertex_colliding_triangles[
-                (collision_buffer_offset + collision_buffer_counter) * 2 + 1
-            ]
-
-            if particle_idx != -1 and tri_idx != -1:
-                tri_a = tri_indices[tri_idx, 0]
-                tri_b = tri_indices[tri_idx, 1]
-                tri_c = tri_indices[tri_idx, 2]
-
-                c_v = particle_colors[particle_idx]
-                c_tri_a = particle_colors[tri_a]
-                c_tri_b = particle_colors[tri_b]
-                c_tri_c = particle_colors[tri_c]
-
-                if (
-                    c_v == current_color
-                    or c_tri_a == current_color
-                    or c_tri_b == current_color
-                    or c_tri_c == current_color
-                ):
-                    (
-                        has_contact,
-                        collision_force_0,
-                        collision_force_1,
-                        collision_force_2,
-                        collision_force_3,
-                        collision_hessian_0,
-                        collision_hessian_1,
-                        collision_hessian_2,
-                        collision_hessian_3,
-                    ) = evaluate_vertex_triangle_collision_force_hessian_4_vertices(
-                        particle_idx,
-                        tri_idx,
-                        pos,
-                        pos_prev,
-                        tri_indices,
-                        collision_radius,
-                        soft_contact_ke,
-                        soft_contact_kd,
-                        friction_mu,
-                        friction_epsilon,
-                        dt,
-                    )
-
-                    if has_contact:
-                        # particle
-                        if c_v == current_color:
-                            wp.atomic_add(particle_forces, particle_idx, collision_force_3)
-                            wp.atomic_add(particle_hessians, particle_idx, collision_hessian_3)
-
-                        # tri_a
-                        if c_tri_a == current_color:
-                            wp.atomic_add(particle_forces, tri_a, collision_force_0)
-                            wp.atomic_add(particle_hessians, tri_a, collision_hessian_0)
-
-                        # tri_b
-                        if c_tri_b == current_color:
-                            wp.atomic_add(particle_forces, tri_b, collision_force_1)
-                            wp.atomic_add(particle_hessians, tri_b, collision_hessian_1)
-
-                        # tri_c
-                        if c_tri_c == current_color:
-                            wp.atomic_add(particle_forces, tri_c, collision_force_2)
-                            wp.atomic_add(particle_hessians, tri_c, collision_hessian_2)
-            collision_buffer_counter += NUM_THREADS_PER_COLLISION_PRIMITIVE
-
-    particle_body_contact_count = min(contact_max, contact_count[0])
-
-    if t_id < particle_body_contact_count:
-        particle_idx = soft_contact_particle[t_id]
-
-        if particle_colors[particle_idx] == current_color:
-            body_contact_force, body_contact_hessian = evaluate_body_particle_contact(
-                particle_idx,
-                pos[particle_idx],
-                pos_prev[particle_idx],
-                t_id,
-                soft_contact_ke,
-                soft_contact_kd,
-                friction_mu,
-                friction_epsilon,
-                particle_radius,
-                shape_material_mu,
-                shape_body,
-                body_q,
-                body_q_prev,
-                body_qd,
-                body_com,
-                contact_shape,
-                contact_body_pos,
-                contact_body_vel,
-                contact_normal,
-                dt,
-            )
-            wp.atomic_add(particle_forces, particle_idx, body_contact_force)
-            wp.atomic_add(particle_hessians, particle_idx, body_contact_hessian)
-
-
 # zcy
 # zcy_forward
 @wp.kernel
@@ -2726,6 +1954,7 @@ def zcy_forward_step_penetration_free(
     particle_conservative_bounds: wp.array(dtype=float),
     inertia: wp.array(dtype=wp.vec3),
     all_particle_flag: wp.array(dtype=wp.int32),
+    truncation_threshold: float,
 ):
     particle_index = wp.tid()
 
@@ -2741,8 +1970,12 @@ def zcy_forward_step_penetration_free(
     pos_inertia = prev_pos[particle_index] + para * vel_new * dt 
     inertia[particle_index] = pos_inertia
 
-    pos[particle_index] = apply_conservative_bound_truncation(
-        particle_index, pos_inertia, pos_prev_collision_detection, particle_conservative_bounds
+    pos[particle_index] = zcy_apply_conservative_bound_truncation(
+        particle_index, 
+        pos_inertia, 
+        pos_prev_collision_detection, 
+        particle_conservative_bounds, 
+        truncation_threshold
     )
 
 @wp.kernel
@@ -2751,11 +1984,16 @@ def zcy_truncation_by_conservative_bounds(
     pos_prev_collision_detection: wp.array(dtype=wp.vec3),
     particle_conservative_bounds: wp.array(dtype=float),
     pos_cur_truncation: wp.array(dtype=wp.vec3),
+    truncation_threshold: float,
 ):
     particle_index = wp.tid()
 
-    pos_cur_truncation[particle_index] = apply_conservative_bound_truncation(
-        particle_index, pos_new[particle_index], pos_prev_collision_detection, particle_conservative_bounds
+    pos_cur_truncation[particle_index] = zcy_apply_conservative_bound_truncation(
+        particle_index, 
+        pos_new[particle_index], 
+        pos_prev_collision_detection, 
+        particle_conservative_bounds, 
+        truncation_threshold
     )
 
 # zcy_hessian
@@ -2767,6 +2005,7 @@ def zcy_VBD_accumulate_contact_force_and_hessian(
     DeBUG_Eigen: bool,
     DeBUG_Contact_EE: bool,
     DeBUG_Contact_VT: bool,
+    barrier_threshold: float,
     pos_prev: wp.array(dtype=wp.vec3),
     dt: float,
     temp_mem1: wp.array(dtype=float),
@@ -2829,6 +2068,7 @@ def zcy_VBD_accumulate_contact_force_and_hessian(
                         friction_mu,
                         friction_epsilon,
                         edge_edge_parallel_epsilon,
+                        barrier_threshold,
                     )
 
                 if DeBUG_Eigen:
@@ -2968,6 +2208,7 @@ def zcy_VBD_accumulate_contact_force_and_hessian(
                     soft_contact_kd,
                     friction_mu,
                     friction_epsilon,
+                    barrier_threshold,
                 )
 
                 if DeBUG_Eigen:
@@ -3440,6 +2681,7 @@ def zcy_accumulate_contact_force(
     # DeBUG
     DeBUG_Contact_EE: bool,
     DeBUG_Contact_VT: bool,
+    barrier_threshold: float,
     pos_prev: wp.array(dtype=wp.vec3),
     dt: float,
     tri_indices: wp.array(dtype=wp.int32, ndim=2),
@@ -3494,6 +2736,7 @@ def zcy_accumulate_contact_force(
                         friction_mu,
                         friction_epsilon,
                         edge_edge_parallel_epsilon,
+                        barrier_threshold
                     )
 
                 #加两遍，除2
@@ -3541,6 +2784,7 @@ def zcy_accumulate_contact_force(
                     soft_contact_kd,
                     friction_mu,
                     friction_epsilon,
+                    barrier_threshold
                 )
 
                 if has_contact:
@@ -3771,6 +3015,7 @@ def zcy_accumulate_contact_energy(
     pos: wp.array(dtype=wp.vec3),
     DeBUG_Contact_EE: bool,
     DeBUG_Contact_VT: bool,
+    barrier_threshold: float,
     tri_indices: wp.array(dtype=wp.int32, ndim=2),
     edge_indices: wp.array(dtype=wp.int32, ndim=2),
     # self contact
@@ -3809,7 +3054,7 @@ def zcy_accumulate_contact_energy(
 
                 if 0.0 < dis < collision_radius:
                     tau = collision_radius * 0.5
-                    if tau > dis > 0.0:
+                    if tau > dis > barrier_threshold:
                         k2 = 0.5 * tau * tau * soft_contact_ke
                         b = 0.5 * soft_contact_ke * (collision_radius - tau) * (collision_radius - tau) + k2 * wp.log(tau)
                         energy_edge = -k2 * wp.log(dis) + b
@@ -3836,7 +3081,7 @@ def zcy_accumulate_contact_energy(
 
                 if 0.0 < dis < collision_radius:
                     tau = collision_radius * 0.5
-                    if tau > dis > 0.0:
+                    if tau > dis > barrier_threshold:
                         k2 = 0.5 * tau * tau * soft_contact_ke
                         b = 0.5 * soft_contact_ke * (collision_radius - tau) * (collision_radius - tau) + k2 * wp.log(tau)
                         energy_vt = -k2 * wp.log(dis) + b
@@ -4001,6 +3246,7 @@ def zcy_line_search_truncation(
     all_particle_flag: wp.array(dtype=wp.int32),
     pos_prev_collision_detection: wp.array(dtype=wp.vec3),
     particle_conservative_bounds: wp.array(dtype=float),
+    truncation_threshold: float,
 ):
     particle_index = wp.tid()
 
@@ -4011,7 +3257,11 @@ def zcy_line_search_truncation(
     pos_before_truncation = pos[particle_index] + dx[particle_index-offset]
     
     pos_truncated = zcy_apply_conservative_bound_truncation(
-        particle_index, pos_before_truncation, pos_prev_collision_detection, particle_conservative_bounds
+        particle_index, 
+        pos_before_truncation, 
+        pos_prev_collision_detection, 
+        particle_conservative_bounds, 
+        truncation_threshold
     )
 
     dx[particle_index-offset] = pos_truncated - pos[particle_index]
@@ -4057,6 +3307,7 @@ def zcy_update_position(
     all_particle_flag: wp.array(dtype=wp.int32),
     pos_prev_collision_detection: wp.array(dtype=wp.vec3),
     particle_conservative_bounds: wp.array(dtype=float),
+    truncation_threshold: float,
 ):
     particle_index = wp.tid()
 
@@ -4066,8 +3317,12 @@ def zcy_update_position(
     offset = all_particle_flag[particle_index]
     pos_before_truncation = pos[particle_index] + dx[particle_index-offset]
 
-    pos[particle_index] = apply_conservative_bound_truncation(
-        particle_index, pos_before_truncation, pos_prev_collision_detection, particle_conservative_bounds
+    pos[particle_index] = zcy_apply_conservative_bound_truncation(
+        particle_index, 
+        pos_before_truncation, 
+        pos_prev_collision_detection, 
+        particle_conservative_bounds, 
+        truncation_threshold,
     )
 
 
@@ -4450,6 +3705,7 @@ class zcy_SolverVBD(SolverBase):
                         self.all_particle_flag, 
                         self.pos_prev_collision_detection, 
                         self.particle_conservative_bounds, 
+                        self.DeBUG['truncation_threshold'],
                         ], 
                 dim=self.num_particle,
                 device=self.device,
@@ -4496,7 +3752,22 @@ class zcy_SolverVBD(SolverBase):
                 # 1.4.check armijo condition
                 residual1, residual_norm1 = self.zcy_compute_residual(pos_warp_test_alpha, pos_prev_warp, vel_warp, dt, mass)
 
-                if energy1.numpy().item() < energy0.numpy().item() + incremental_energy.numpy().item() :#and residual_norm1 < residual_norm0 + 1e-6 :
+                # break condition
+                energy_condition = (
+                    energy1.numpy().item() < energy0.numpy().item() + incremental_energy.numpy().item() 
+                    and not self.DeBUG['line_search_control_residual']
+                )
+                numerical_precision_condition = (
+                    np.abs(incremental_energy.numpy().item()/energy0.numpy().item()) < 1e-7
+                    and self.DeBUG['numerical_precision_condition']
+                )
+                energy_residual_condition = (
+                    energy1.numpy().item() < energy0.numpy().item() + incremental_energy.numpy().item()
+                    and residual_norm1 < residual_norm0 + 1e-6 
+                    and self.DeBUG['line_search_control_residual']
+                )
+
+                if energy_condition or energy_residual_condition or numerical_precision_condition:
                     break
                 else:
                     alpha *= gamma
@@ -4564,7 +3835,18 @@ class zcy_SolverVBD(SolverBase):
                         # 写入当前迭代信息
                         f.write(f'residual_norm: {residual_norm0} |energy: {energy0} |incremental_energy: {incremental_energy} |alpha: {alpha}\n\n')
                 
-            if residual_norm0 < tolerance or residual_norm0/residual_norm_forward < 1e-3 :
+            absolute_residual_condition = (
+                residual_norm0 < tolerance
+            )
+            relative_residual_condition = (
+                residual_norm0/residual_norm_forward < 1e-3
+            )
+            numerical_precision_condition = (
+                abs(dx.numpy()).max() < 1e-7
+                and self.DeBUG['numerical_precision_condition']
+            )
+            
+            if absolute_residual_condition or relative_residual_condition or numerical_precision_condition:
                 break
 
             # region: iteration information 
@@ -4658,9 +3940,27 @@ class zcy_SolverVBD(SolverBase):
         # bending hessian
         bending_hessian_rows, bending_hessian_cols, bending_hessian_values = self.zcy_compute_bending_hessian_force(pos_warp, pos_prev_warp, dt)
         
-        A_rows = np.concatenate((self.A_rows, spring_hessian_rows.numpy(), edge_contact_hessian_rows.numpy(), vt_contact_hessian_rows.numpy(), bending_hessian_rows.numpy()), axis=0)
-        A_cols = np.concatenate((self.A_cols, spring_hessian_cols.numpy(), edge_contact_hessian_cols.numpy(), vt_contact_hessian_cols.numpy(), bending_hessian_cols.numpy()), axis=0)
-        A_values = np.concatenate((self.A_values, spring_hessian_values.numpy(), edge_contact_hessian_values.numpy(), vt_contact_hessian_values.numpy(), bending_hessian_values.numpy()), axis=0)
+        A_rows = np.concatenate(
+            (self.A_rows, 
+            spring_hessian_rows.numpy(), 
+            edge_contact_hessian_rows.numpy(), 
+            vt_contact_hessian_rows.numpy(), 
+            bending_hessian_rows.numpy()), axis=0
+        )
+        A_cols = np.concatenate(
+            (self.A_cols, 
+            spring_hessian_cols.numpy(),
+            edge_contact_hessian_cols.numpy(),
+            vt_contact_hessian_cols.numpy(),
+            bending_hessian_cols.numpy()), axis=0
+        )
+        A_values = np.concatenate(
+            (self.A_values, 
+            spring_hessian_values.numpy(), 
+            edge_contact_hessian_values.numpy(), 
+            vt_contact_hessian_values.numpy(), 
+            bending_hessian_values.numpy()), axis=0
+        )
 
         A_rows, A_cols, A_values = warp_coo_deduplicate(wp.array(A_rows, dtype=int), wp.array(A_cols, dtype=int), wp.array(A_values, dtype=wp.mat33))
 
@@ -4724,6 +4024,7 @@ class zcy_SolverVBD(SolverBase):
                     # DeBUG
                     self.DeBUG['Contact_EE'],
                     self.DeBUG['Contact_VT'],
+                    self.DeBUG['barrier_threshold'],
                     pos_prev_warp,
                     dt,
                     self.model.tri_indices,
@@ -4844,6 +4145,7 @@ class zcy_SolverVBD(SolverBase):
                     # DeBUG
                     self.DeBUG['Contact_EE'],
                     self.DeBUG['Contact_VT'],
+                    self.DeBUG['barrier_threshold'],
                     self.model.tri_indices,
                     self.model.edge_indices,
                     # self-contact
@@ -4977,6 +4279,7 @@ class zcy_SolverVBD(SolverBase):
                     self.DeBUG['Eigen'],
                     self.DeBUG['Contact_EE'],
                     self.DeBUG['Contact_VT'],
+                    self.DeBUG['barrier_threshold'],
                     pos_prev_warp,
                     dt,
                     temp_buffer1,
@@ -5219,6 +4522,7 @@ class zcy_SolverVBD(SolverBase):
                 self.particle_conservative_bounds,
                 self.inertia,
                 self.all_particle_flag,
+                self.DeBUG['truncation_threshold'],
             ],
             dim=model.particle_count,
             device=self.device,
@@ -5260,6 +4564,7 @@ class zcy_SolverVBD(SolverBase):
             ],
             outputs=[
                 pos_new,
+                self.DeBUG['truncation_threshold'],
             ],
             dim=self.model.particle_count,
             device=self.device,
