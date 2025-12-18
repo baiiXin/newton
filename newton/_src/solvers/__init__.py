@@ -22,7 +22,7 @@ from .solver import SolverBase
 from .style3d import SolverStyle3D
 from .vbd import SolverVBD
 from .xpbd import SolverXPBD
-from .zcy_vbd import zcy_SolverVBD
+from .zcy_newton import zcy_SolverNewton
 
 
 __all__ = [
@@ -35,5 +35,5 @@ __all__ = [
     "SolverStyle3D",
     "SolverVBD",
     "SolverXPBD",
-    "zcy_SolverVBD",
+    "zcy_SolverNewton",
 ]

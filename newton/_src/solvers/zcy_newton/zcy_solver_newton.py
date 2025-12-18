@@ -22,11 +22,6 @@ import numpy as np
 import warp as wp
 from warp.types import float32, matrix
 
-from warp.sparse import bsr_from_triplets
-from warp.optim.linear import cg
-from warp.sparse import bsr_zeros, bsr_identity, bsr_diag
-from warp.sparse import bsr_mm, bsr_mv, bsr_axpy, bsr_scale
-
 import numpy as np
 from scipy.sparse import bsr_matrix
 from pypardiso import spsolve
@@ -2669,7 +2664,7 @@ def zcy_assemble_inertia_and_gravity_add_force(
     # inertia
     inertia = pos_warp[free_particle] - pos_prev_warp[free_particle] - dt * vel_warp[free_particle]
 
-    grad[tid] = mass / dt**2 * inertia - (spring_forces[free_particle] + edge_contact_forces[free_particle] + vt_contact_forces[free_particle] + bending_forces[free_particle] + mass * gravity)
+    grad[tid] = mass / (dt * dt) * inertia - (spring_forces[free_particle] + edge_contact_forces[free_particle] + vt_contact_forces[free_particle] + bending_forces[free_particle] + mass * gravity)
 
 # zcy_force
 @wp.kernel
@@ -2962,7 +2957,7 @@ def zcy_residual_computation(
     # inertia
     inertia = pos_warp[free_particle] - pos_prev_warp[free_particle] - dt * vel_warp[free_particle]
 
-    residual[tid] = mass / dt**2 * inertia - (spring_forces[free_particle] + edge_contact_forces[free_particle] + vt_contact_forces[free_particle] + bending_forces[free_particle] + mass * gravity)
+    residual[tid] = mass / (dt * dt) * inertia - (spring_forces[free_particle] + edge_contact_forces[free_particle] + vt_contact_forces[free_particle] + bending_forces[free_particle] + mass * gravity)
 
 
 @wp.kernel
@@ -3448,7 +3443,7 @@ def build_bsr_from_block_coo(blocks_data: np.ndarray,
 
 # zcy
 
-class zcy_SolverVBD(SolverBase):
+class zcy_SolverNewton(SolverBase):
 
     def __init__(
         self,
@@ -4236,7 +4231,7 @@ class zcy_SolverVBD(SolverBase):
         # inertia and gravity
         self.A_rows = np.array([i for i in range(self.num_particle)])
         self.A_cols = np.array([i for i in range(self.num_particle)])
-        self.A_values = np.array([np.eye(3) * mass / dt**2 for _ in range(self.num_particle)])
+        self.A_values = np.array([np.eye(3) * mass / (dt * dt) for _ in range(self.num_particle)])
 
         if not self.DeBUG['Inertia_Hessian']:
             self.A_values.zero_()
