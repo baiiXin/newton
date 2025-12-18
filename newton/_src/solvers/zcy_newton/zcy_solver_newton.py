@@ -3684,13 +3684,17 @@ class zcy_SolverNewton(SolverBase):
                     f.write(str([cond, is_symmetric, is_spd, eig_min, eig_max]) + "\n\n")
 
 
+            # dx
+            dx_truncated = wp.zeros_like(dx)
+            dx_truncated.assign(dx)
+
             ### line search
             # region: line search
             # 0.1.initialization
             # truncation dx
             wp.launch(
                 kernel=zcy_line_search_truncation,
-                inputs=[dx, 
+                inputs=[dx_truncated, 
                         # input
                         pos_warp, 
                         self.all_particle_flag, 
@@ -3719,7 +3723,7 @@ class zcy_SolverNewton(SolverBase):
                     kernel=zcy_line_search_test_position,
                     inputs=[pos_warp_test_alpha, 
                             # input
-                            dx,
+                            dx_truncated,
                             alpha,
                             self.all_particle_flag, 
                             ], 
@@ -3749,12 +3753,14 @@ class zcy_SolverNewton(SolverBase):
                     and not self.DeBUG['line_search_control_residual']
                 )
                 numerical_precision_condition0 = (
-                    np.abs(incremental_energy.numpy().item()/energy0.numpy().item()) < 1e-6
+                    (np.abs(incremental_energy.numpy().item()/energy0.numpy().item()) < 1e-7
+                    or np.abs(energy0.numpy().item()) < 1e-7
+                    or np.abs(incremental_energy.numpy().item()) < 1e-7)
                     and self.DeBUG['numerical_precision_condition']
                 )
                 energy_residual_condition = (
                     energy1.numpy().item() < energy0.numpy().item() + incremental_energy.numpy().item()
-                    and residual_norm1 < residual_norm0 + 1e-6 
+                    and residual_norm1 < residual_norm0 + 1e-6
                     and self.DeBUG['line_search_control_residual']
                 )
 
@@ -3833,11 +3839,13 @@ class zcy_SolverNewton(SolverBase):
                 residual_norm0/residual_norm_forward < 1e-3
             )
             numerical_precision_condition1 = (
-                abs(energy0.numpy().item()- energy1.numpy().item())/abs(energy0.numpy().item()) < 1e-6
+                (abs(energy0.numpy().item()- energy1.numpy().item())/abs(energy0.numpy().item()) < 1e-7
+                or abs(energy0.numpy().item()) < 1e-7 
+                or abs(energy0.numpy().item()- energy1.numpy().item()) < 1e-7)
                 and self.DeBUG['numerical_precision_condition']
             )
             
-            if absolute_residual_condition or relative_residual_condition or numerical_precision_condition0 or numerical_precision_condition1:
+            if absolute_residual_condition or relative_residual_condition or numerical_precision_condition1:
                 break
 
             # region: iteration information 
