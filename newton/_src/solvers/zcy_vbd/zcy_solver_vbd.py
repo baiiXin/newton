@@ -1952,7 +1952,6 @@ def zcy_forward_step_penetration_free(
     vel: wp.array(dtype=wp.vec3),
     pos_prev_collision_detection: wp.array(dtype=wp.vec3),
     particle_conservative_bounds: wp.array(dtype=float),
-    inertia: wp.array(dtype=wp.vec3),
     all_particle_flag: wp.array(dtype=wp.int32),
     truncation_threshold: float,
 ):
@@ -1966,9 +1965,8 @@ def zcy_forward_step_penetration_free(
     else:
         para = 1.0
 
-    vel_new = vel[particle_index] + gravity * dt
+    vel_new = vel[particle_index] + para * gravity * dt
     pos_inertia = prev_pos[particle_index] + para * vel_new * dt 
-    inertia[particle_index] = pos_inertia
 
     pos[particle_index] = zcy_apply_conservative_bound_truncation(
         particle_index, 
@@ -2661,7 +2659,7 @@ def zcy_assemble_inertia_and_gravity_add_force(
     # fixed particle
     free_particle_offset: wp.array(dtype=wp.int32),
     # outputs: 
-    b: wp.array(dtype=wp.vec3)
+    grad: wp.array(dtype=wp.vec3)
 ):
     tid = wp.tid() 
     free_particle = tid + free_particle_offset[tid]
@@ -2671,7 +2669,7 @@ def zcy_assemble_inertia_and_gravity_add_force(
     # inertia
     inertia = pos_warp[free_particle] - pos_prev_warp[free_particle] - dt * vel_warp[free_particle]
 
-    b[tid] = -1.0/dt/dt * mass * inertia + spring_forces[free_particle] + edge_contact_forces[free_particle] + vt_contact_forces[free_particle] + bending_forces[free_particle] + gravity
+    grad[tid] = mass / dt**2 * inertia - (spring_forces[free_particle] + edge_contact_forces[free_particle] + vt_contact_forces[free_particle] + bending_forces[free_particle] + mass * gravity)
 
 # zcy_force
 @wp.kernel
@@ -2961,12 +2959,11 @@ def zcy_residual_computation(
     tid = wp.tid() 
     free_particle = tid + free_particle_offset[tid]
 
-    # wp.printf("Thread %d: free_particle = %d\n", tid, free_particle)
-
     # inertia
     inertia = pos_warp[free_particle] - pos_prev_warp[free_particle] - dt * vel_warp[free_particle]
 
-    residual[tid] = inertia - 1.0/mass *dt*dt * (spring_forces[free_particle] + edge_contact_forces[free_particle] + vt_contact_forces[free_particle] + bending_forces[free_particle] + gravity)
+    residual[tid] = mass / dt**2 * inertia - (spring_forces[free_particle] + edge_contact_forces[free_particle] + vt_contact_forces[free_particle] + bending_forces[free_particle] + mass * gravity)
+
 
 @wp.kernel
 def zcy_compute_incremental_energy(
@@ -3005,7 +3002,7 @@ def zcy_accumulate_inertia_energy(
     # inertia
     inertia = pos_warp[free_particle] - pos_prev_warp[free_particle] - dt * vel_warp[free_particle]
 
-    energy_inertia = 0.5 * mass * wp.dot(inertia, inertia) /dt/dt  - mass * wp.dot(pos_warp[free_particle], gravity)
+    energy_inertia = 0.5 * mass * wp.dot(inertia, inertia) /dt/dt  + mass * wp.dot(pos_warp[free_particle], -gravity)
 
     wp.atomic_add(energy, 0, energy_inertia)
 
@@ -3298,8 +3295,7 @@ def zcy_update_velocity(
         return
 
     vel[particle] = damping * (pos[particle] - pos_prev[particle]) / dt
-    #wp.printf("Thread %d: vel[particle] = %.12f * (%.12f - %.12f) / %.12f = %.12f\n", particle, damping, pos[particle][2], pos_prev[particle][2], dt, vel[particle][2])
-
+  
 @wp.kernel
 def zcy_update_position(
     pos: wp.array(dtype=wp.vec3), 
@@ -3650,8 +3646,8 @@ class zcy_SolverVBD(SolverBase):
             self.zcy_collision_detection_penetration_free(pos_warp)
 
             # assemble matrix and vector
-            A = self.zcy_assemble_matrix(pos_warp, pos_prev_warp, dt)
-            b = self.zcy_assemble_vector(pos_warp, pos_prev_warp, vel_warp, dt, mass)
+            A =   self.zcy_assemble_matrix(pos_warp, pos_prev_warp, dt)
+            b = - self.zcy_assemble_vector(pos_warp, pos_prev_warp, vel_warp, dt, mass)
   
             dx = spsolve(A.tocsr(), b.numpy().reshape(self.free_particle_num*3).astype(np.float64))
             dx = wp.array(dx.reshape(self.free_particle_num,3), dtype=wp.vec3)
@@ -3757,8 +3753,8 @@ class zcy_SolverVBD(SolverBase):
                     energy1.numpy().item() < energy0.numpy().item() + incremental_energy.numpy().item() 
                     and not self.DeBUG['line_search_control_residual']
                 )
-                numerical_precision_condition = (
-                    np.abs(incremental_energy.numpy().item()/energy0.numpy().item()) < 1e-7
+                numerical_precision_condition0 = (
+                    np.abs(incremental_energy.numpy().item()/energy0.numpy().item()) < 1e-6
                     and self.DeBUG['numerical_precision_condition']
                 )
                 energy_residual_condition = (
@@ -3767,7 +3763,7 @@ class zcy_SolverVBD(SolverBase):
                     and self.DeBUG['line_search_control_residual']
                 )
 
-                if energy_condition or energy_residual_condition or numerical_precision_condition:
+                if energy_condition or energy_residual_condition or numerical_precision_condition0:
                     break
                 else:
                     alpha *= gamma
@@ -3841,12 +3837,12 @@ class zcy_SolverVBD(SolverBase):
             relative_residual_condition = (
                 residual_norm0/residual_norm_forward < 1e-3
             )
-            numerical_precision_condition = (
-                abs(dx.numpy()).max() < 1e-7
+            numerical_precision_condition1 = (
+                abs(energy0.numpy().item()- energy1.numpy().item())/abs(energy0.numpy().item()) < 1e-6
                 and self.DeBUG['numerical_precision_condition']
             )
             
-            if absolute_residual_condition or relative_residual_condition or numerical_precision_condition:
+            if absolute_residual_condition or relative_residual_condition or numerical_precision_condition0 or numerical_precision_condition1:
                 break
 
             # region: iteration information 
@@ -3903,7 +3899,7 @@ class zcy_SolverVBD(SolverBase):
     def zcy_assemble_vector(self, pos_warp, pos_prev_warp, vel_warp, dt, mass):
         
         # inertia and gravity
-        b = wp.zeros(shape=(self.free_particle_num,), dtype=wp.vec3)
+        grad = wp.zeros(shape=(self.free_particle_num,), dtype=wp.vec3)
 
         wp.launch(
             kernel=zcy_assemble_inertia_and_gravity_add_force,
@@ -3922,13 +3918,13 @@ class zcy_SolverVBD(SolverBase):
                 # fixed particle
                 self.free_particle_offset,
                 # outputs: 
-                b
+                grad
             ],
             dim=self.free_particle_num,
             device=self.device,
         )
 
-        return b
+        return grad
 
     def zcy_assemble_matrix(self, pos_warp, pos_prev_warp, dt):
         # contact hessian
@@ -4520,7 +4516,6 @@ class zcy_SolverVBD(SolverBase):
                 vel_warp,
                 self.pos_prev_collision_detection,
                 self.particle_conservative_bounds,
-                self.inertia,
                 self.all_particle_flag,
                 self.DeBUG['truncation_threshold'],
             ],
