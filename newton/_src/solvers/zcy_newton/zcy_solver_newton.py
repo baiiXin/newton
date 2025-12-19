@@ -3753,9 +3753,8 @@ class zcy_SolverNewton(SolverBase):
                     and not self.DeBUG['line_search_control_residual']
                 )
                 numerical_precision_condition0 = (
-                    (np.abs(incremental_energy.numpy().item()/energy0.numpy().item()) < 1e-7
-                    or np.abs(energy0.numpy().item()) < 1e-7
-                    or np.abs(incremental_energy.numpy().item()) < 1e-7)
+                    (np.abs(incremental_energy.numpy().item()/(abs(energy0.numpy().item())+1e-12)) < 1e-7
+                    or np.abs(incremental_energy.numpy().item()) < 1e-9)
                     and self.DeBUG['numerical_precision_condition']
                 )
                 energy_residual_condition = (
@@ -3836,16 +3835,19 @@ class zcy_SolverNewton(SolverBase):
                 residual_norm0 < tolerance
             )
             relative_residual_condition = (
-                residual_norm0/residual_norm_forward < 1e-3
+                residual_norm0/(residual_norm_forward + 1e-12) < 1e-3
             )
             numerical_precision_condition1 = (
-                (abs(energy0.numpy().item()- energy1.numpy().item())/abs(energy0.numpy().item()) < 1e-7
-                or abs(energy0.numpy().item()) < 1e-7 
-                or abs(energy0.numpy().item()- energy1.numpy().item()) < 1e-7)
+                (abs(energy0.numpy().item()- energy1.numpy().item())/(abs(energy0.numpy().item()) + 1e-12) < 1e-7
+                or abs(energy0.numpy().item()- energy1.numpy().item()) < 1e-9)
                 and self.DeBUG['numerical_precision_condition']
             )
             
-            if absolute_residual_condition or relative_residual_condition or numerical_precision_condition1:
+            if absolute_residual_condition or relative_residual_condition:
+                break
+            if numerical_precision_condition0 or numerical_precision_condition1:
+                with open(log_warning_path, "a", encoding="utf-8") as f:
+                    f.write(f'"Warning: Newton iteration stalled. Energy implies convergence but Residual is high."\n')
                 break
 
             # region: iteration information 
