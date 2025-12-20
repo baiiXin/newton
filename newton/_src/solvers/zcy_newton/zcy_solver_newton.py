@@ -131,368 +131,6 @@ def get_vertex_adjacent_spring_id(adjacency: ForceElementAdjacencyInfo, vertex: 
     return adjacency.v_adj_springs[offset + spring]
 
 
-@wp.kernel
-def _test_compute_force_element_adjacency(
-    adjacency: ForceElementAdjacencyInfo,
-    edge_indices: wp.array(dtype=wp.int32, ndim=2),
-    face_indices: wp.array(dtype=wp.int32, ndim=2),
-):
-    wp.printf("num vertices: %d\n", adjacency.v_adj_edges_offsets.shape[0] - 1)
-    for vertex in range(adjacency.v_adj_edges_offsets.shape[0] - 1):
-        num_adj_edges = get_vertex_num_adjacent_edges(adjacency, vertex)
-        for i_bd in range(num_adj_edges):
-            bd_id, v_order = get_vertex_adjacent_edge_id_order(adjacency, vertex, i_bd)
-
-            if edge_indices[bd_id, v_order] != vertex:
-                print("Error!!!")
-                wp.printf("vertex: %d | num_adj_edges: %d\n", vertex, num_adj_edges)
-                wp.printf("--iBd: %d | ", i_bd)
-                wp.printf("edge id: %d | v_order: %d\n", bd_id, v_order)
-
-        num_adj_faces = get_vertex_num_adjacent_faces(adjacency, vertex)
-
-        for i_face in range(num_adj_faces):
-            face, v_order = get_vertex_adjacent_face_id_order(
-                adjacency,
-                vertex,
-                i_face,
-            )
-
-            if face_indices[face, v_order] != vertex:
-                print("Error!!!")
-                wp.printf("vertex: %d | num_adj_faces: %d\n", vertex, num_adj_faces)
-                wp.printf("--i_face: %d | face id: %d | v_order: %d\n", i_face, face, v_order)
-                wp.printf(
-                    "--face: %d %d %d\n",
-                    face_indices[face, 0],
-                    face_indices[face, 1],
-                    face_indices[face, 2],
-                )
-
-
-@wp.func
-def build_orthonormal_basis(n: wp.vec3):
-    """
-    Builds an orthonormal basis given a normal vector `n`. Return the two axes that is perpendicular to `n`.
-
-    :param n: A 3D vector (list or array-like) representing the normal vector
-    """
-    b1 = wp.vec3()
-    b2 = wp.vec3()
-    if n[2] < 0.0:
-        a = 1.0 / (1.0 - n[2])
-        b = n[0] * n[1] * a
-        b1[0] = 1.0 - n[0] * n[0] * a
-        b1[1] = -b
-        b1[2] = n[0]
-
-        b2[0] = b
-        b2[1] = n[1] * n[1] * a - 1.0
-        b2[2] = -n[1]
-    else:
-        a = 1.0 / (1.0 + n[2])
-        b = -n[0] * n[1] * a
-        b1[0] = 1.0 - n[0] * n[0] * a
-        b1[1] = b
-        b1[2] = -n[0]
-
-        b2[0] = b
-        b2[1] = 1.0 - n[1] * n[1] * a
-        b2[2] = -n[1]
-
-    return b1, b2
-
-
-@wp.func
-def evaluate_stvk_force_hessian(
-    face: int,
-    v_order: int,
-    pos: wp.array(dtype=wp.vec3),
-    pos_prev: wp.array(dtype=wp.vec3),
-    tri_indices: wp.array(dtype=wp.int32, ndim=2),
-    tri_pose: wp.mat22,
-    area: float,
-    mu: float,
-    lmbd: float,
-    damping: float,
-    dt: float,
-):
-    # StVK energy density: psi = mu * ||G||_F^2 + 0.5 * lambda * (trace(G))^2
-
-    # Deformation gradient F = [f0, f1] (3x2 matrix as two 3D column vectors)
-    v0 = tri_indices[face, 0]
-    v1 = tri_indices[face, 1]
-    v2 = tri_indices[face, 2]
-
-    x0 = pos[v0]
-    x01 = pos[v1] - x0
-    x02 = pos[v2] - x0
-
-    # Cache tri_pose elements
-    DmInv00 = tri_pose[0, 0]
-    DmInv01 = tri_pose[0, 1]
-    DmInv10 = tri_pose[1, 0]
-    DmInv11 = tri_pose[1, 1]
-
-    # Compute F columns directly: F = [x01, x02] * tri_pose = [f0, f1]
-    f0 = x01 * DmInv00 + x02 * DmInv10
-    f1 = x01 * DmInv01 + x02 * DmInv11
-
-    # Green strain tensor: G = 0.5(F^T F - I) = [[G00, G01], [G01, G11]] (symmetric 2x2)
-    f0_dot_f0 = wp.dot(f0, f0)
-    f1_dot_f1 = wp.dot(f1, f1)
-    f0_dot_f1 = wp.dot(f0, f1)
-
-    G00 = 0.5 * (f0_dot_f0 - 1.0)
-    G11 = 0.5 * (f1_dot_f1 - 1.0)
-    G01 = 0.5 * f0_dot_f1
-
-    # Frobenius norm squared of Green strain: ||G||_F^2 = G00^2 + G11^2 + 2 * G01^2
-    G_frobenius_sq = G00 * G00 + G11 * G11 + 2.0 * G01 * G01
-    if G_frobenius_sq < 1.0e-20:
-        return wp.vec3(0.0), wp.mat33(0.0)
-
-    trace_G = G00 + G11
-
-    # First Piola-Kirchhoff stress tensor (StVK model)
-    # PK1 = 2*mu*F*G + lambda*trace(G)*F = [PK1_col0, PK1_col1] (3x2)
-    lambda_trace_G = lmbd * trace_G
-    two_mu = 2.0 * mu
-
-    PK1_col0 = f0 * (two_mu * G00 + lambda_trace_G) + f1 * (two_mu * G01)
-    PK1_col1 = f0 * (two_mu * G01) + f1 * (two_mu * G11 + lambda_trace_G)
-
-    # Vertex selection using masks to avoid branching
-    mask0 = float(v_order == 0)
-    mask1 = float(v_order == 1)
-    mask2 = float(v_order == 2)
-
-    # Deformation gradient derivatives w.r.t. current vertex position
-    df0_dx = DmInv00 * (mask1 - mask0) + DmInv10 * (mask2 - mask0)
-    df1_dx = DmInv01 * (mask1 - mask0) + DmInv11 * (mask2 - mask0)
-
-    # Force via chain rule: force = -(dpsi/dF) : (dF/dx)
-    dpsi_dx = PK1_col0 * df0_dx + PK1_col1 * df1_dx
-    force = -dpsi_dx
-
-    # Hessian computation using Cauchy-Green invariants
-    df0_dx_sq = df0_dx * df0_dx
-    df1_dx_sq = df1_dx * df1_dx
-    df0_df1_cross = df0_dx * df1_dx
-
-    Ic = f0_dot_f0 + f1_dot_f1
-    two_dpsi_dIc = -mu + (0.5 * Ic - 1.0) * lmbd
-    I33 = wp.identity(n=3, dtype=float)
-
-    f0_outer_f0 = wp.outer(f0, f0)
-    f1_outer_f1 = wp.outer(f1, f1)
-    f0_outer_f1 = wp.outer(f0, f1)
-    f1_outer_f0 = wp.outer(f1, f0)
-
-    H_IIc00_scaled = mu * (f0_dot_f0 * I33 + 2.0 * f0_outer_f0 + f1_outer_f1)
-    H_IIc11_scaled = mu * (f1_dot_f1 * I33 + 2.0 * f1_outer_f1 + f0_outer_f0)
-    H_IIc01_scaled = mu * (f0_dot_f1 * I33 + f1_outer_f0)
-
-    # d2(psi)/dF^2 components
-    d2E_dF2_00 = lmbd * f0_outer_f0 + two_dpsi_dIc * I33 + H_IIc00_scaled
-    d2E_dF2_01 = lmbd * f0_outer_f1 + H_IIc01_scaled
-    d2E_dF2_11 = lmbd * f1_outer_f1 + two_dpsi_dIc * I33 + H_IIc11_scaled
-
-    # Chain rule: H = (dF/dx)^T * (d2(psi)/dF^2) * (dF/dx)
-    hessian = df0_dx_sq * d2E_dF2_00 + df1_dx_sq * d2E_dF2_11 + df0_df1_cross * (d2E_dF2_01 + wp.transpose(d2E_dF2_01))
-
-    if damping > 0.0:
-        inv_dt = 1.0 / dt
-
-        # Previous deformation gradient for velocity
-        x0_prev = pos_prev[v0]
-        x01_prev = pos_prev[v1] - x0_prev
-        x02_prev = pos_prev[v2] - x0_prev
-
-        vel_x01 = (x01 - x01_prev) * inv_dt
-        vel_x02 = (x02 - x02_prev) * inv_dt
-
-        df0_dt = vel_x01 * DmInv00 + vel_x02 * DmInv10
-        df1_dt = vel_x01 * DmInv01 + vel_x02 * DmInv11
-
-        # First constraint: Cmu = ||G||_F (Frobenius norm of Green strain)
-        Cmu = wp.sqrt(G_frobenius_sq)
-
-        G00_normalized = G00 / Cmu
-        G01_normalized = G01 / Cmu
-        G11_normalized = G11 / Cmu
-
-        # Time derivative of Green strain: dG/dt = 0.5 * (F^T * dF/dt + (dF/dt)^T * F)
-        dG_dt_00 = wp.dot(f0, df0_dt)  # dG00/dt
-        dG_dt_11 = wp.dot(f1, df1_dt)  # dG11/dt
-        dG_dt_01 = 0.5 * (wp.dot(f0, df1_dt) + wp.dot(f1, df0_dt))  # dG01/dt
-
-        # Time derivative of first constraint: dCmu/dt = (1/||G||_F) * (G : dG/dt)
-        dCmu_dt = G00_normalized * dG_dt_00 + G11_normalized * dG_dt_11 + 2.0 * G01_normalized * dG_dt_01
-
-        # Gradient of first constraint w.r.t. deformation gradient: dCmu/dF = (G/||G||_F) * F
-        dCmu_dF_col0 = G00_normalized * f0 + G01_normalized * f1  # dCmu/df0
-        dCmu_dF_col1 = G01_normalized * f0 + G11_normalized * f1  # dCmu/df1
-
-        # Gradient of constraint w.r.t. vertex position: dCmu/dx = (dCmu/dF) : (dF/dx)
-        dCmu_dx = df0_dx * dCmu_dF_col0 + df1_dx * dCmu_dF_col1
-
-        # Damping force from first constraint: -mu * damping * (dCmu/dt) * (dCmu/dx)
-        kd_mu = mu * damping
-        force += -kd_mu * dCmu_dt * dCmu_dx
-
-        # Damping Hessian: mu * damping * (1/dt) * (dCmu/dx) x (dCmu/dx)
-        hessian += kd_mu * inv_dt * wp.outer(dCmu_dx, dCmu_dx)
-
-        # Second constraint: Clmbd = trace(G) = G00 + G11 (trace of Green strain)
-        # Time derivative of second constraint: dClmbd/dt = trace(dG/dt)
-        dClmbd_dt = dG_dt_00 + dG_dt_11
-
-        # Gradient of second constraint w.r.t. deformation gradient: dClmbd/dF = F
-        dClmbd_dF_col0 = f0  # dClmbd/df0
-        dClmbd_dF_col1 = f1  # dClmbd/df1
-
-        # Gradient of Clmbd w.r.t. vertex position: dClmbd/dx = (dClmbd/dF) : (dF/dx)
-        dClmbd_dx = df0_dx * dClmbd_dF_col0 + df1_dx * dClmbd_dF_col1
-
-        # Damping force from second constraint: -lambda * damping * (dClmbd/dt) * (dClmbd/dx)
-        kd_lmbd = lmbd * damping
-        force += -kd_lmbd * dClmbd_dt * dClmbd_dx
-
-        # Damping Hessian from second constraint: lambda * damping * (1/dt) * (dClmbd/dx) x (dClmbd/dx)
-        hessian += kd_lmbd * inv_dt * wp.outer(dClmbd_dx, dClmbd_dx)
-
-    # Apply area scaling
-    force *= area
-    hessian *= area
-
-    return force, hessian
-
-
-@wp.func
-def compute_normalized_vector_derivative(
-    unnormalized_vec_length: float, normalized_vec: wp.vec3, unnormalized_vec_derivative: wp.mat33
-) -> wp.mat33:
-    projection_matrix = wp.identity(n=3, dtype=float) - wp.outer(normalized_vec, normalized_vec)
-
-    # d(normalized_vec)/dx = (1/|unnormalized_vec|) * (I - normalized_vec * normalized_vec^T) * d(unnormalized_vec)/dx
-    return (1.0 / unnormalized_vec_length) * projection_matrix * unnormalized_vec_derivative
-
-
-@wp.func
-def compute_angle_derivative(
-    n1_hat: wp.vec3,
-    n2_hat: wp.vec3,
-    e_hat: wp.vec3,
-    dn1hat_dx: wp.mat33,
-    dn2hat_dx: wp.mat33,
-    sin_theta: float,
-    cos_theta: float,
-    skew_n1: wp.mat33,
-    skew_n2: wp.mat33,
-) -> wp.vec3:
-    dsin_dx = wp.transpose(skew_n1 * dn2hat_dx - skew_n2 * dn1hat_dx) * e_hat
-    dcos_dx = wp.transpose(dn1hat_dx) * n2_hat + wp.transpose(dn2hat_dx) * n1_hat
-
-    # dtheta/dx = dsin/dx * cos - dcos/dx * sin
-    return dsin_dx * cos_theta - dcos_dx * sin_theta
-
-
-@wp.func
-def evaluate_body_particle_contact(
-    particle_index: int,
-    particle_pos: wp.vec3,
-    particle_prev_pos: wp.vec3,
-    contact_index: int,
-    soft_contact_ke: float,
-    soft_contact_kd: float,
-    friction_mu: float,
-    friction_epsilon: float,
-    particle_radius: wp.array(dtype=float),
-    shape_material_mu: wp.array(dtype=float),
-    shape_body: wp.array(dtype=int),
-    body_q: wp.array(dtype=wp.transform),
-    body_q_prev: wp.array(dtype=wp.transform),
-    body_qd: wp.array(dtype=wp.spatial_vector),
-    body_com: wp.array(dtype=wp.vec3),
-    contact_shape: wp.array(dtype=int),
-    contact_body_pos: wp.array(dtype=wp.vec3),
-    contact_body_vel: wp.array(dtype=wp.vec3),
-    contact_normal: wp.array(dtype=wp.vec3),
-    dt: float,
-):
-    shape_index = contact_shape[contact_index]
-    body_index = shape_body[shape_index]
-
-    X_wb = wp.transform_identity()
-    X_com = wp.vec3()
-    if body_index >= 0:
-        X_wb = body_q[body_index]
-        X_com = body_com[body_index]
-
-    # body position in world space
-    bx = wp.transform_point(X_wb, contact_body_pos[contact_index])
-
-    n = contact_normal[contact_index]
-
-    penetration_depth = -(wp.dot(n, particle_pos - bx) - particle_radius[particle_index])
-    if penetration_depth > 0:
-        body_contact_force_norm = penetration_depth * soft_contact_ke
-        body_contact_force = n * body_contact_force_norm
-        body_contact_hessian = soft_contact_ke * wp.outer(n, n)
-
-        mu = shape_material_mu[shape_index]
-
-        dx = particle_pos - particle_prev_pos
-
-        if wp.dot(n, dx) < 0:
-            damping_hessian = (soft_contact_kd / dt) * body_contact_hessian
-            body_contact_hessian = body_contact_hessian + damping_hessian
-            body_contact_force = body_contact_force - damping_hessian * dx
-
-        # body velocity
-        if body_q_prev:
-            # if body_q_prev is available, compute velocity using finite difference method
-            # this is more accurate for simulating static friction
-            X_wb_prev = wp.transform_identity()
-            if body_index >= 0:
-                X_wb_prev = body_q_prev[body_index]
-            bx_prev = wp.transform_point(X_wb_prev, contact_body_pos[contact_index])
-            bv = (bx - bx_prev) / dt + wp.transform_vector(X_wb, contact_body_vel[contact_index])
-
-        else:
-            # otherwise use the instantaneous velocity
-            r = bx - wp.transform_point(X_wb, X_com)
-            body_v_s = wp.spatial_vector()
-            if body_index >= 0:
-                body_v_s = body_qd[body_index]
-
-            body_w = wp.spatial_bottom(body_v_s)
-            body_v = wp.spatial_top(body_v_s)
-
-            # compute the body velocity at the particle position
-            bv = body_v + wp.cross(body_w, r) + wp.transform_vector(X_wb, contact_body_vel[contact_index])
-
-        relative_translation = dx - bv * dt
-
-        # friction
-        e0, e1 = build_orthonormal_basis(n)
-
-        T = mat32(e0[0], e1[0], e0[1], e1[1], e0[2], e1[2])
-
-        u = wp.transpose(T) * relative_translation
-        eps_u = friction_epsilon * dt
-
-        friction_force, friction_hessian = compute_friction(mu, body_contact_force_norm, T, u, eps_u)
-        body_contact_force = body_contact_force + friction_force
-        body_contact_hessian = body_contact_hessian + friction_hessian
-    else:
-        body_contact_force = wp.vec3(0.0, 0.0, 0.0)
-        body_contact_hessian = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-
-    return body_contact_force, body_contact_hessian
-
-
 @wp.func
 def evaluate_self_contact_force_norm(dis: float, collision_radius: float, k: float, barrier_threshold: float):
     # Adjust distance and calculate penetration depth
@@ -516,21 +154,55 @@ def evaluate_self_contact_force_norm(dis: float, collision_radius: float, k: flo
     return dEdD, d2E_dDdD
 
 
-@wp.func
-def damp_collision(
-    displacement: wp.vec3,
-    collision_normal: wp.vec3,
-    collision_hessian: wp.mat33,
-    collision_damping: float,
-    dt: float,
+@wp.kernel
+def compute_particle_conservative_bound(
+    # inputs
+    conservative_bound_relaxation: float,
+    collision_query_radius: float,
+    adjacency: ForceElementAdjacencyInfo,
+    collision_info: TriMeshCollisionInfo,
+    # outputs
+    particle_conservative_bounds: wp.array(dtype=float),
 ):
-    if wp.dot(displacement, collision_normal) > 0:
-        damping_hessian = (collision_damping / dt) * collision_hessian
-        damping_force = damping_hessian * displacement
-        return damping_force, damping_hessian
-    else:
-        return wp.vec3(0.0), wp.mat33(0.0)
+    particle_index = wp.tid()
+    min_dist = wp.min(collision_query_radius, collision_info.vertex_colliding_triangles_min_dist[particle_index])
 
+    # bound from neighbor triangles
+    for i_adj_tri in range(
+        get_vertex_num_adjacent_faces(
+            adjacency,
+            particle_index,
+        )
+    ):
+        tri_index, vertex_order = get_vertex_adjacent_face_id_order(
+            adjacency,
+            particle_index,
+            i_adj_tri,
+        )
+        min_dist = wp.min(min_dist, collision_info.triangle_colliding_vertices_min_dist[tri_index])
+
+    # bound from neighbor edges
+    for i_adj_edge in range(
+        get_vertex_num_adjacent_edges(
+            adjacency,
+            particle_index,
+        )
+    ):
+        nei_edge_index, vertex_order_on_edge = get_vertex_adjacent_edge_id_order(
+            adjacency,
+            particle_index,
+            i_adj_edge,
+        )
+        # vertex is on the edge; otherwise it only effects the bending energy
+        if vertex_order_on_edge == 2 or vertex_order_on_edge == 3:
+            # collisions of neighbor edges
+            min_dist = wp.min(min_dist, collision_info.edge_colliding_edges_min_dist[nei_edge_index])
+
+    particle_conservative_bounds[particle_index] = conservative_bound_relaxation * min_dist
+
+
+
+# region: zcy
 # zcy
 # svd
 # ==============================================================================
@@ -1765,176 +1437,10 @@ def zcy_apply_conservative_bound_truncation(
     else:
         return pos_new
 # zcy
+# endregion: zcy
 
 
-@wp.func
-def compute_friction(mu: float, normal_contact_force: float, T: mat32, u: wp.vec2, eps_u: float):
-    """
-    Returns the 1D friction force and hessian.
-    Args:
-        mu: Friction coefficient.
-        normal_contact_force: normal contact force.
-        T: Transformation matrix (3x2 matrix).
-        u: 2D displacement vector.
-    """
-    # Friction
-    u_norm = wp.length(u)
-
-    if u_norm > 0.0:
-        # IPC friction
-        if u_norm > eps_u:
-            # constant stage
-            f1_SF_over_x = 1.0 / u_norm
-        else:
-            # smooth transition
-            f1_SF_over_x = (-u_norm / eps_u + 2.0) / eps_u
-
-        force = -mu * normal_contact_force * T * (f1_SF_over_x * u)
-
-        # Different from IPC, we treat the contact normal as constant
-        # this significantly improves the stability
-        hessian = mu * normal_contact_force * T * (f1_SF_over_x * wp.identity(2, float)) * wp.transpose(T)
-    else:
-        force = wp.vec3(0.0, 0.0, 0.0)
-        hessian = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-
-    return force, hessian
-
-
-@wp.kernel
-def forward_step(
-    dt: float,
-    gravity: wp.vec3,
-    pos_prev: wp.array(dtype=wp.vec3),
-    pos: wp.array(dtype=wp.vec3),
-    vel: wp.array(dtype=wp.vec3),
-    inv_mass: wp.array(dtype=float),
-    external_force: wp.array(dtype=wp.vec3),
-    particle_flags: wp.array(dtype=wp.int32),
-    inertia: wp.array(dtype=wp.vec3),
-):
-    particle = wp.tid()
-
-    pos_prev[particle] = pos[particle]
-    if not particle_flags[particle] & ParticleFlags.ACTIVE:
-        inertia[particle] = pos_prev[particle]
-        return
-    vel_new = vel[particle] + (gravity + external_force[particle] * inv_mass[particle]) * dt
-    pos[particle] = pos[particle] + vel_new * dt
-    inertia[particle] = pos[particle]
-
-
-@wp.kernel
-def compute_particle_conservative_bound(
-    # inputs
-    conservative_bound_relaxation: float,
-    collision_query_radius: float,
-    adjacency: ForceElementAdjacencyInfo,
-    collision_info: TriMeshCollisionInfo,
-    # outputs
-    particle_conservative_bounds: wp.array(dtype=float),
-):
-    particle_index = wp.tid()
-    min_dist = wp.min(collision_query_radius, collision_info.vertex_colliding_triangles_min_dist[particle_index])
-
-    # bound from neighbor triangles
-    for i_adj_tri in range(
-        get_vertex_num_adjacent_faces(
-            adjacency,
-            particle_index,
-        )
-    ):
-        tri_index, vertex_order = get_vertex_adjacent_face_id_order(
-            adjacency,
-            particle_index,
-            i_adj_tri,
-        )
-        min_dist = wp.min(min_dist, collision_info.triangle_colliding_vertices_min_dist[tri_index])
-
-    # bound from neighbor edges
-    for i_adj_edge in range(
-        get_vertex_num_adjacent_edges(
-            adjacency,
-            particle_index,
-        )
-    ):
-        nei_edge_index, vertex_order_on_edge = get_vertex_adjacent_edge_id_order(
-            adjacency,
-            particle_index,
-            i_adj_edge,
-        )
-        # vertex is on the edge; otherwise it only effects the bending energy
-        if vertex_order_on_edge == 2 or vertex_order_on_edge == 3:
-            # collisions of neighbor edges
-            min_dist = wp.min(min_dist, collision_info.edge_colliding_edges_min_dist[nei_edge_index])
-
-    particle_conservative_bounds[particle_index] = conservative_bound_relaxation * min_dist
-
-
-@wp.kernel
-def validate_conservative_bound(
-    pos: wp.array(dtype=wp.vec3),
-    pos_prev_collision_detection: wp.array(dtype=wp.vec3),
-    particle_conservative_bounds: wp.array(dtype=float),
-):
-    v_index = wp.tid()
-
-    displacement = wp.length(pos[v_index] - pos_prev_collision_detection[v_index])
-
-    if displacement > particle_conservative_bounds[v_index] * 1.01 and displacement > 1e-5:
-        # wp.expect_eq(displacement <= particle_conservative_bounds[v_index] * 1.01, True)
-        wp.printf(
-            "Vertex %d has moved by %f exceeded the limit of %f\n",
-            v_index,
-            displacement,
-            particle_conservative_bounds[v_index],
-        )
-
-
-@wp.kernel
-def copy_particle_positions_back(
-    particle_ids_in_color: wp.array(dtype=wp.int32),
-    pos: wp.array(dtype=wp.vec3),
-    pos_new: wp.array(dtype=wp.vec3),
-):
-    tid = wp.tid()
-    particle = particle_ids_in_color[tid]
-
-    pos[particle] = pos_new[particle]
-
-
-@wp.kernel
-def update_velocity(
-    dt: float, pos_prev: wp.array(dtype=wp.vec3), pos: wp.array(dtype=wp.vec3), vel: wp.array(dtype=wp.vec3)
-):
-    particle = wp.tid()
-    vel[particle] = (pos[particle] - pos_prev[particle]) / dt
-
-
-@wp.kernel
-def convert_body_particle_contact_data_kernel(
-    # inputs
-    body_particle_contact_buffer_pre_alloc: int,
-    soft_contact_particle: wp.array(dtype=int),
-    contact_count: wp.array(dtype=int),
-    contact_max: int,
-    # outputs
-    body_particle_contact_buffer: wp.array(dtype=int),
-    body_particle_contact_count: wp.array(dtype=int),
-):
-    contact_index = wp.tid()
-    count = min(contact_max, contact_count[0])
-    if contact_index >= count:
-        return
-
-    particle_index = soft_contact_particle[contact_index]
-    offset = particle_index * body_particle_contact_buffer_pre_alloc
-
-    contact_counter = wp.atomic_add(body_particle_contact_count, particle_index, 1)
-    if contact_counter < body_particle_contact_buffer_pre_alloc:
-        body_particle_contact_buffer[offset + contact_counter] = contact_index
-
-
+# region: zcy
 # zcy
 # zcy_forward
 @wp.kernel
@@ -3439,9 +2945,34 @@ def build_bsr_from_block_coo(blocks_data: np.ndarray,
     A_bsr = bsr_matrix((blocks_data, indices, indptr), shape=(nb * br, nb * bc))
     return A_bsr
 
+# check by fd
+@wp.kernel
+def zcy_inertia_and_gravity_grad_computation(
+    pos_warp: wp.array(dtype=wp.vec3),
+    pos_prev_warp: wp.array(dtype=wp.vec3),
+    vel_warp: wp.array(dtype=wp.vec3),
+    dt: float,
+    mass: float,
+    gravity: wp.vec3,
+    # fixed particle
+    free_particle_offset: wp.array(dtype=wp.int32),
+    # outputs: 
+    inertia_grad: wp.array(dtype=wp.vec3)
+):
+    tid = wp.tid() 
+    free_particle = tid + free_particle_offset[tid]
+
+    # inertia
+    inertia = pos_warp[free_particle] - pos_prev_warp[free_particle] - dt * vel_warp[free_particle]
+
+    inertia_grad[tid] = mass / (dt * dt) * inertia - (mass * gravity)
+
+
 
 
 # zcy
+# endregion: zcy
+
 
 class zcy_SolverNewton(SolverBase):
 
@@ -3753,8 +3284,10 @@ class zcy_SolverNewton(SolverBase):
                     and not self.DeBUG['line_search_control_residual']
                 )
                 numerical_precision_condition0 = (
-                    (np.abs(incremental_energy.numpy().item()/(abs(energy0.numpy().item())+1e-12)) < 1e-7
-                    or np.abs(incremental_energy.numpy().item()) < 1e-9)
+                    (np.abs(incremental_energy.numpy().item()/(abs(energy0.numpy().item())+1e-12)) 
+                    < self.DeBUG['numerical_precision_rel_tolerance']
+                    or np.abs(incremental_energy.numpy().item()) < 
+                    self.DeBUG['numerical_precision_abs_tolerance'])
                     and self.DeBUG['numerical_precision_condition']
                 )
                 energy_residual_condition = (
@@ -3832,14 +3365,14 @@ class zcy_SolverNewton(SolverBase):
                         f.write(f'residual_norm: {residual_norm0} |energy: {energy0} |incremental_energy: {incremental_energy} |alpha: {alpha}\n\n')
                 
             absolute_residual_condition = (
-                residual_norm0 < tolerance
+                residual_norm0 < self.DeBUG['convergence_abs_tolerance']
             )
             relative_residual_condition = (
-                residual_norm0/(residual_norm_forward + 1e-12) < 1e-3
+                residual_norm0/(residual_norm_forward + 1e-12) < self.DeBUG['convergence_rel_tolerance']
             )
             numerical_precision_condition1 = (
-                (abs(energy0.numpy().item()- energy1.numpy().item())/(abs(energy0.numpy().item()) + 1e-12) < 1e-7
-                or abs(energy0.numpy().item()- energy1.numpy().item()) < 1e-9)
+                (abs(energy0.numpy().item()- energy1.numpy().item())/(abs(energy0.numpy().item()) + 1e-12) < self.DeBUG['numerical_precision_rel_tolerance']
+                or abs(energy0.numpy().item()- energy1.numpy().item()) < self.DeBUG['numerical_precision_abs_tolerance'])
                 and self.DeBUG['numerical_precision_condition']
             )
             
@@ -3847,7 +3380,10 @@ class zcy_SolverNewton(SolverBase):
                 break
             if numerical_precision_condition0 or numerical_precision_condition1:
                 with open(log_warning_path, "a", encoding="utf-8") as f:
-                    f.write(f'"Warning: Newton iteration stalled. Energy implies convergence but Residual is high."\n')
+                    f.write(f'time_step: {time_step}; iter: {_iter}; line_search_times: {_line_search_times} \n')
+                    f.write(f'condition0:{numerical_precision_condition0}; condition1:{numerical_precision_condition1}\n')
+                    f.write(f'residual_norm0: {residual_norm0} |energy0: {energy0} |incremental_energy: {incremental_energy} |alpha: {alpha}\n')
+                    f.write(f'"Warning: Newton iteration stalled. Energy implies convergence but Residual is high."\n\n')
                 break
 
             # region: iteration information 
@@ -4586,6 +4122,303 @@ class zcy_SolverNewton(SolverBase):
         self.vt_contact_hessian_values = wp.zeros(self.num_vt_contact*16, dtype=wp.mat33, device=self.device)
         self.vt_contact_hessian_rows = wp.zeros(self.num_vt_contact*16, dtype=int, device=self.device)
         self.vt_contact_hessian_cols = wp.zeros(self.num_vt_contact*16, dtype=int, device=self.device)
+
+    def zcy_check_grad_and_hessian_via_fd(self, pos_warp, pos_prev_warp, vel_warp, dt: float, Check_Switch:dict):
+        '''
+        input: 
+            pos_warp: current position
+            pos_prev_warp: previous position
+            vel_warp: current velocity
+            dt: time step
+            Check_Switch: switch of every energy(inertia, elastic, bending and collision)
+        
+        output:
+            # 1.energy, grad and hessian of my solver
+                energy: energy of my solver
+                grad: gradient of my solver
+                hessian: hessian of my solver
+
+            # 2.energy, grad and hessian of finite difference
+                grad_fd_of_enegy: gradient of finite difference
+                hessian_fd_of_energy: hessian of finite difference
+                hessian_fd_of_grad: hessian of finite difference
+
+            # 3.verification metric
+                grad_error_norm_of_energy_fd: norm of gradient error of finite difference and mysolver
+                hessian_error_norm_of_grad_fd: norm of hessian error of finite difference and mysolver
+        '''
+        # 0. Switch
+        self.DeBUG['Spring'] = Check_Switch['Elastic']
+        self.DeBUG['Bending'] = Check_Switch['Bending']
+        self.DeBUG['Contact'] = Check_Switch['Contact']
+        self.DeBUG['Contact_EE'] = Check_Switch['Contact_EE']
+        self.DeBUG['Contact_VT'] = Check_Switch['Contact_VT']
+        self.DeBUG['Inertia_Hessian'] = Check_Switch['Inertia_Hessian']
+        self.spring['Spring'] = Check_Switch['Spring_Elastic']
+    
+        # compute energy
+        energy = self.zcy_compute_energy_for_fd_check(pos_warp, pos_prev_warp, vel_warp, dt, mass, Check_Switch)
+
+        # compute grad
+        grad = self.zcy_compute_grad_for_fd_check(pos_warp, pos_prev_warp, vel_warp, dt, mass, Check_Switch)
+
+        # compute hessian
+        hessian = self.zcy_compute_hessian_for_fd_check(pos_warp, pos_prev_warp, vel_warp, dt, mass, Check_Switch)
+        
+        # compute grad_fd_by_fd_enegy
+        #grad_fd_by_fd_energy = self.zcy_compute_grad_fd_by_fd_energy(pos_warp, pos_prev_warp, vel_warp, dt, mass, Check_Switch)
+
+        # compute hessian_fd_by_fd_grad
+        #hessian_fd_by_fd_grad = self.zcy_compute_hessian_fd_by_fd_grad(pos_warp, pos_prev_warp, vel_warp, dt, mass, Check_Switch)
+
+        # compute error norm of grad
+
+        # compute error norm of hessian
+
+
+    def zcy_compute_energy_for_fd_check(self, pos_warp, pos_prev_warp, vel_warp, dt, mass, Check_Switch):
+
+        energy = wp.zeros(shape=(1,), dtype=float)
+
+        # inertia energy
+        if Check_Switch['Inertia']:
+            wp.launch(
+                kernel=zcy_accumulate_inertia_energy,
+                inputs=[
+                    pos_warp,
+                    pos_prev_warp,
+                    vel_warp,
+                    dt,
+                    mass,
+                    self.model.gravity,
+                    # fixed particle
+                    self.free_particle_offset,
+                    # outputs: 
+                    energy
+                ],
+                dim=self.free_particle_num,
+                device=self.device,
+            )
+
+        # contact energy
+        if Check_Switch['Contact']:
+            wp.launch(
+                kernel=zcy_accumulate_contact_energy,
+                inputs=[
+                    pos_warp,
+                    # DeBUG
+                    Check_Switch['Contact_EE'],
+                    Check_Switch['Contact_VT'],
+                    self.DeBUG['barrier_threshold'],
+                    self.model.tri_indices,
+                    self.model.edge_indices,
+                    # self-contact
+                    self.trimesh_collision_info,
+                    self.self_contact_radius,
+                    self.model.soft_contact_ke,
+                    self.trimesh_collision_detector.edge_edge_parallel_epsilon,
+                    # outputs: 
+                    energy
+                ],
+                dim=self.num_contact,
+                device=self.device,
+            )
+
+        # elastic energy
+        if Check_Switch['Elastic']:
+            if Check_Switch['Spring_Elastic']:
+                wp.launch(
+                    kernel=zcy_accumulate_spring_energy,
+                    inputs=[
+                        pos_warp,
+                        # spring constraints
+                        self.spring_indices,
+                        self.spring_rest_length,
+                        self.spring_stiffness,
+                        # outputs: 
+                        energy
+                    ],
+                    dim=self.num_spring,
+                    device=self.device,
+                )
+            elif Check_Switch['Stvk_Elastic']:
+                wp.launch(
+                    kernel=zcy_accumulate_stvk_energy,
+                    inputs=[
+                        pos_warp,
+                        # stvk force and hessian
+                        self.model.tri_indices,
+                        self.model.tri_poses,
+                        self.model.tri_materials,
+                        self.model.tri_areas,
+                        # outputs: 
+                        energy
+                    ],
+                    dim=self.num_triangles,
+                    device=self.device,
+                )
+
+        # bending energy
+        if Check_Switch['Bending']:
+            wp.launch(
+                kernel=zcy_accumulate_bending_energy,
+                inputs=[
+                    pos_warp,
+                    # bending force and hessian
+                    self.model.edge_indices,
+                    self.model.edge_rest_angle,
+                    self.model.edge_rest_length,
+                    self.model.edge_bending_properties,
+                    # output
+                    energy
+                ],
+            dim=self.num_spring,
+            device=self.device,
+        )
+
+        return energy
+
+    def zcy_compute_grad_for_fd_check(self, pos_warp, pos_prev_warp, dt, Check_Switch):
+        grad = wp.zeros(shape=(self.model.particle_count, 3), dtype=float)
+
+        # region: 0.inertia and gravity
+        inertia_grad = wp.zeros(shape=(self.free_particle_num,), dtype=wp.vec3)
+
+        if Check_Switch['Inertia']:
+            wp.launch(
+                kernel=zcy_inertia_and_gravity_grad_computation,
+                inputs=[
+                    pos_warp,
+                    pos_prev_warp,
+                    vel_warp,
+                    dt,
+                    mass,
+                    self.model.gravity,
+                    # fixed particle
+                    self.free_particle_offset,
+                    # outputs: 
+                    inertia_grad
+                ],
+                dim=self.free_particle_num,
+                device=self.device,
+            )
+    # endregion
+ 
+        # region: 1.contact force
+        # edge_contact
+        self.edge_contact_forces.zero_()
+        # vertex-triangle_contact
+        self.vt_contact_forces.zero_()
+        # DeBUG_array
+        if Check_Switch['Contact']:
+            # dim
+            wp.launch(
+                kernel=zcy_accumulate_contact_force,
+                dim=self.num_contact,
+                inputs=[
+                    pos_warp,
+                    # DeBUG
+                    Check_Switch['Contact_EE'],
+                    Check_Switch['Contact_VT'],
+                    self.DeBUG['barrier_threshold'],
+                    pos_prev_warp,
+                    dt,
+                    self.model.tri_indices,
+                    self.model.edge_indices,
+                    # self-contact
+                    self.trimesh_collision_info,
+                    self.self_contact_radius,
+                    self.model.soft_contact_ke,
+                    self.model.soft_contact_kd,
+                    self.model.soft_contact_mu,
+                    self.friction_epsilon,
+                    self.trimesh_collision_detector.edge_edge_parallel_epsilon,
+                ],
+                outputs=[
+                    # edge_contact
+                    self.edge_contact_forces,
+                    # vertex-triangle_contact
+                    self.vt_contact_forces,
+                ],
+                device=self.device,
+            )
+    # endregion
+
+        # region: 2.elastic force
+        self.spring_forces.zero_()
+
+        if Check_Switch['Spring']:
+            if Check_Switch['Spring_Elastic']:
+                wp.launch(
+                    kernel=zcy_accumulate_spring_force,
+                    inputs=[
+                        pos_warp,
+                        pos_prev_warp,
+                        dt,
+                        # spring constraints
+                        self.spring_indices,
+                        self.spring_rest_length,
+                        self.spring_stiffness,
+                        self.model.spring_damping,
+                        # outputs: particle force and hessian
+                        self.spring_forces,
+                    ],
+                    dim=self.num_spring,
+                    device=self.device,
+                )
+            elif Check_Switch['Stvk_Elastic']:
+                wp.launch(
+                    kernel=zcy_accumulate_stvk_force,
+                    inputs=[
+                        pos_warp,
+                        pos_prev_warp,
+                        dt,
+                        # stvk force and hessian
+                        self.model.tri_indices,
+                        self.model.tri_poses,
+                        self.model.tri_materials,
+                        self.model.tri_areas,
+                        # outputs: particle force and hessian
+                        self.spring_forces,
+                    ],
+                    dim=self.num_triangles,
+                    device=self.device,
+                )
+    # endregion
+
+        # region: 3.bending force
+        self.bending_forces.zero_()
+        if Check_Switch['Bending']:     
+            wp.launch(
+                kernel=zcy_accumulate_bending_force,
+                inputs=[
+                    pos_warp,
+                    pos_prev_warp,
+                    dt,
+                    # bending force and hessian
+                    self.model.edge_indices,
+                    self.model.edge_rest_angle,
+                    self.model.edge_rest_length,
+                    self.model.edge_bending_properties,
+                    # outputs: particle force and hessian
+                    self.bending_forces,
+                ],
+                dim=self.num_spring,
+                device=self.device,
+            )
+    # endregion
+
+        grad = inertia_grad - (self.spring_forces + self.edge_contact_forces + self.vt_contact_forces + self.bending_forces)
+
+        return grad
+
+    def zcy_compute_hessian_for_fd_check(self, pos_warp, pos_prev_warp, dt, Check_Switch):
+
+        Hessian =   self.zcy_assemble_matrix(pos_warp, pos_prev_warp, dt)
+
+        return Hessian
+
+      
 # zcy
 
     def compute_force_element_adjacency(self, model):
