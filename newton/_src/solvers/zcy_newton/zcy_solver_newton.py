@@ -3142,7 +3142,7 @@ class zcy_SolverNewton(SolverBase):
         if self.DeBUG['DeBUG']:
             log_residual_path = f"running_log/run_{self.DeBUG['record_name']}_residual_log.txt"
             with open(log_residual_path, "a", encoding="utf-8") as f:
-                    f.write(f'--- time_step: {time_step} ---\n')
+                    f.write(f'\n--- time_step: {time_step} ---\n')
                     f.write(f'forward: residual_norm_forward: {residual_norm_forward}, energy_forward: {energy_forward}\n')
 
             if self.DeBUG['max_information']:
@@ -3362,7 +3362,7 @@ class zcy_SolverNewton(SolverBase):
             if self.DeBUG['DeBUG']:
                 with open(log_residual_path, "a", encoding="utf-8") as f:
                         # 写入当前迭代信息
-                        f.write(f'residual_norm: {residual_norm0} |energy: {energy0} |incremental_energy: {incremental_energy} |alpha: {alpha}\n\n')
+                        f.write(f'residual_norm: {residual_norm0} |energy: {energy0} |incremental_energy: {incremental_energy} |alpha: {alpha}\n')
                 
             absolute_residual_condition = (
                 residual_norm0 < self.DeBUG['convergence_abs_tolerance']
