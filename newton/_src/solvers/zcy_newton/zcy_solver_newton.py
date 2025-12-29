@@ -2827,31 +2827,69 @@ def zcy_update_position(
 def warp_coo_deduplicate(rows, cols, vals):
     """
     去重 COO 格式，vals 为 3x3 矩阵块，只做 sum 聚合
+    - 过滤无效 (0,0,0) 碰撞
+    - 保证至少一个 (0,0) + 0 block
+    - 使用 np.bincount 替代 np.add.at
     """
     rows_np = rows.numpy()
     cols_np = cols.numpy()
-    vals_np = vals.numpy()  # shape (nnz, 3, 3)
-    
-    max_col = np.max(cols_np) if len(cols_np) > 0 else 0
+    vals_np = vals.numpy()  # (nnz, 3, 3)
+
+    nnz = rows_np.shape[0]
+
+    # -----------------------------
+    # 1. 过滤无效碰撞
+    #    定义：row=0, col=0, 且 3x3 block 全为 0
+    # -----------------------------
+    if nnz > 0:
+        invalid_mask = (
+            (rows_np == 0) &
+            (cols_np == 0) &
+            np.all(vals_np == 0, axis=(1, 2))
+        )
+        valid_mask = ~invalid_mask
+
+        rows_np = rows_np[valid_mask]
+        cols_np = cols_np[valid_mask]
+        vals_np = vals_np[valid_mask]
+
+    # -----------------------------
+    # 2. 保证至少一个 (0,0) + 0 block
+    # -----------------------------
+    if rows_np.size == 0:
+        rows_np = np.array([0], dtype=rows_np.dtype)
+        cols_np = np.array([0], dtype=cols_np.dtype)
+        vals_np = np.zeros((1, 3, 3), dtype=vals_np.dtype)
+
+    # -----------------------------
+    # 3. COO 去重
+    # -----------------------------
+    max_col = np.max(cols_np)
     idx = rows_np * (max_col + 1) + cols_np
-    
+
     unique_idx, inv = np.unique(idx, return_inverse=True)
-    n_unique = len(unique_idx)
-    
+    n_unique = unique_idx.shape[0]
+
     out_rows_np = unique_idx // (max_col + 1)
     out_cols_np = unique_idx % (max_col + 1)
-    
-    # 向量化累加 3x3 块
-    vals_flat = vals_np.reshape(vals_np.shape[0], -1)   # (nnz, 9)
+
+    # -----------------------------
+    # 4. 用 bincount 累加 3x3 block
+    # -----------------------------
+    vals_flat = vals_np.reshape(-1, 9)  # (nnz_valid, 9)
     out_vals_flat = np.zeros((n_unique, 9), dtype=vals_np.dtype)
-    np.add.at(out_vals_flat, inv, vals_flat)
+
+    for k in range(9):
+        out_vals_flat[:, k] = np.bincount(
+            inv,
+            weights=vals_flat[:, k],
+            minlength=n_unique
+        )
+
     out_vals_np = out_vals_flat.reshape(n_unique, 3, 3)
 
-    return (
-        wp.array(out_rows_np, dtype=int),
-        wp.array(out_cols_np, dtype=int),
-        wp.array(out_vals_np, dtype=vals.dtype)
-    )
+    # 如果后面不用 Warp
+    return out_rows_np, out_cols_np, out_vals_np
 
 def remove_fixed_blocks(rows, cols, vals, flag_all_particle):
     """
@@ -2944,6 +2982,116 @@ def build_bsr_from_block_coo(blocks_data: np.ndarray,
 
     A_bsr = bsr_matrix((blocks_data, indices, indptr), shape=(nb * br, nb * bc))
     return A_bsr
+
+# pure numpy version
+def coo_deduplicate_np(rows_np, cols_np, vals_np):
+    """
+    纯 NumPy COO 去重
+    输入:
+        rows_np : (nnz,)
+        cols_np : (nnz,)
+        vals_np : (nnz, 3, 3)
+    输出:
+        out_rows_np : (n_unique,)
+        out_cols_np : (n_unique,)
+        out_vals_np : (n_unique, 3, 3)
+    """
+
+    nnz = rows_np.shape[0]
+
+    # -----------------------------
+    # 1. 过滤无效 (0,0) + zero block
+    # -----------------------------
+    if nnz > 0:
+        invalid_mask = (
+            (rows_np == 0) &
+            (cols_np == 0) &
+            np.all(vals_np == 0, axis=(1, 2))
+        )
+        valid_mask = ~invalid_mask
+
+        rows_np = rows_np[valid_mask]
+        cols_np = cols_np[valid_mask]
+        vals_np = vals_np[valid_mask]
+
+    # -----------------------------
+    # 2. 保证至少一个占位 (0,0)
+    # -----------------------------
+    if rows_np.size == 0:
+        rows_np = np.array([0], dtype=rows_np.dtype)
+        cols_np = np.array([0], dtype=cols_np.dtype)
+        vals_np = np.zeros((1, 3, 3), dtype=vals_np.dtype)
+
+    # -----------------------------
+    # 3. COO 去重
+    # -----------------------------
+    max_col = np.max(cols_np)
+    idx = rows_np * (max_col + 1) + cols_np
+
+    unique_idx, inv = np.unique(idx, return_inverse=True)
+    n_unique = unique_idx.shape[0]
+
+    out_rows_np = unique_idx // (max_col + 1)
+    out_cols_np = unique_idx % (max_col + 1)
+
+    # -----------------------------
+    # 4. bincount 累加 3x3 block
+    # -----------------------------
+    vals_flat = vals_np.reshape(-1, 9)
+    out_vals_flat = np.zeros((n_unique, 9), dtype=vals_np.dtype)
+
+    for k in range(9):
+        out_vals_flat[:, k] = np.bincount(
+            inv,
+            weights=vals_flat[:, k],
+            minlength=n_unique
+        )
+
+    out_vals_np = out_vals_flat.reshape(n_unique, 3, 3)
+
+    return out_rows_np, out_cols_np, out_vals_np
+
+def remove_fixed_blocks_np(rows_np, cols_np, vals_np, flag_all_particle_np):
+    """
+    纯 NumPy 版本：
+    从 COO (rows, cols, vals) 中删除涉及 fixed_points 的块，
+    并根据 flag_all_particle 进行行列偏移。
+
+    参数:
+        rows_np : (nnz,) np.ndarray
+        cols_np : (nnz,) np.ndarray
+        vals_np : (nnz, 3, 3) np.ndarray
+        flag_all_particle_np : (n_points,) np.ndarray
+            -1 表示固定点
+             其他值表示该点之前被删除的固定点数（偏移量）
+
+    返回:
+        rows_np, cols_np, vals_np （均为 NumPy 数组）
+    """
+    # -----------------------------
+    # 1️⃣ 向量化判断是否涉及 fixed 点
+    # -----------------------------
+    row_fixed = flag_all_particle_np[rows_np] == -1
+    col_fixed = flag_all_particle_np[cols_np] == -1
+
+    keep_mask = ~(row_fixed | col_fixed)
+
+    # -----------------------------
+    # 2️⃣ 过滤
+    # -----------------------------
+    rows_np = rows_np[keep_mask]
+    cols_np = cols_np[keep_mask]
+    vals_np = vals_np[keep_mask]
+
+    # -----------------------------
+    # 3️⃣ 应用偏移（重编号）
+    #     new_idx = old_idx - offset
+    # -----------------------------
+    rows_np = rows_np - flag_all_particle_np[rows_np]
+    cols_np = cols_np - flag_all_particle_np[cols_np]
+
+    return rows_np, cols_np, vals_np
+
 
 # check by fd
 @wp.kernel
@@ -3060,6 +3208,8 @@ class zcy_SolverNewton(SolverBase):
         # region: my
         # debug
         self.DeBUG = DeBUG
+        self.dt = dt
+        self.mass = mass
 
         # particle information
         self.num_particle = self.model.particle_count
@@ -3139,6 +3289,12 @@ class zcy_SolverNewton(SolverBase):
         print('residual_norm_forward:', residual_norm_forward, 'energy_forward:', energy_forward)
         
         # debug_information_log
+        if self.DeBUG['DeBUG0']:
+            log_residual_path = f"running_log/run_{self.DeBUG['record_name']}_residual_log.txt"
+            with open(log_residual_path, "a", encoding="utf-8") as f:
+                    f.write(f'\n--- time_step: {time_step} ---\n')
+                    f.write(f'forward: residual_norm_forward: {residual_norm_forward}, energy_forward: {energy_forward}\n')
+                    
         if self.DeBUG['DeBUG']:
             log_residual_path = f"running_log/run_{self.DeBUG['record_name']}_residual_log.txt"
             with open(log_residual_path, "a", encoding="utf-8") as f:
@@ -3359,7 +3515,7 @@ class zcy_SolverNewton(SolverBase):
             
             print('residual_norm:', residual_norm0, '|energy:', energy0, '|incremental_energy:', incremental_energy, '|alpha:', alpha)
             
-            if self.DeBUG['DeBUG']:
+            if self.DeBUG['DeBUG'] or self.DeBUG['DeBUG0']:
                 with open(log_residual_path, "a", encoding="utf-8") as f:
                         # 写入当前迭代信息
                         f.write(f'residual_norm: {residual_norm0} |energy: {energy0} |incremental_energy: {incremental_energy} |alpha: {alpha}\n')
@@ -3479,32 +3635,32 @@ class zcy_SolverNewton(SolverBase):
         
         A_rows = np.concatenate(
             (self.A_rows, 
-            spring_hessian_rows.numpy(), 
-            edge_contact_hessian_rows.numpy(), 
-            vt_contact_hessian_rows.numpy(), 
-            bending_hessian_rows.numpy()), axis=0
+            spring_hessian_rows, 
+            edge_contact_hessian_rows, 
+            vt_contact_hessian_rows, 
+            bending_hessian_rows), axis=0
         )
         A_cols = np.concatenate(
             (self.A_cols, 
-            spring_hessian_cols.numpy(),
-            edge_contact_hessian_cols.numpy(),
-            vt_contact_hessian_cols.numpy(),
-            bending_hessian_cols.numpy()), axis=0
+            spring_hessian_cols,
+            edge_contact_hessian_cols,
+            vt_contact_hessian_cols,
+            bending_hessian_cols), axis=0
         )
         A_values = np.concatenate(
             (self.A_values, 
-            spring_hessian_values.numpy(), 
-            edge_contact_hessian_values.numpy(), 
-            vt_contact_hessian_values.numpy(), 
-            bending_hessian_values.numpy()), axis=0
+            spring_hessian_values, 
+            edge_contact_hessian_values, 
+            vt_contact_hessian_values, 
+            bending_hessian_values), axis=0
         )
 
-        A_rows, A_cols, A_values = warp_coo_deduplicate(wp.array(A_rows, dtype=int), wp.array(A_cols, dtype=int), wp.array(A_values, dtype=wp.mat33))
+        A_rows, A_cols, A_values = coo_deduplicate_np(A_rows.astype(int), A_cols.astype(int), A_values)
 
-        A_rows, A_cols, A_values = remove_fixed_blocks(A_rows, A_cols, A_values, self.all_particle_flag)
+        A_rows, A_cols, A_values = remove_fixed_blocks_np(A_rows, A_cols, A_values, self.all_particle_flag.numpy())
 
         A = build_bsr_from_block_coo(
-            A_values.numpy(), A_rows.numpy(), A_cols.numpy(), 
+            A_values, A_rows, A_cols, 
             nb=self.free_particle_num, blocksize=(3, 3)
         )
 
@@ -3780,7 +3936,7 @@ class zcy_SolverNewton(SolverBase):
         self.A_values = np.array([np.eye(3) * mass / (dt * dt) for _ in range(self.num_particle)])
 
         if not self.DeBUG['Inertia_Hessian']:
-            self.A_values.zero_()
+            self.A_values.fill(0.0)
         
 
     def zcy_compute_contact_hessian_force(
@@ -3867,9 +4023,9 @@ class zcy_SolverNewton(SolverBase):
 
         if self.DeBUG['DeBUG'] & self.DeBUG['record_hessian']:
             path_hessian = f"running_log/run_{self.DeBUG['record_name']}_hessian_isbeing_log.txt"
-            contact_ee_hessian = np.abs(edge_contact_hessian_values.numpy()).max()
+            contact_ee_hessian = np.abs(edge_contact_hessian_values).max()
             contact_ee_residual = np.abs(edge_contact_forces.numpy()).max()
-            contact_vt_hessian = np.abs(vt_contact_hessian_values.numpy()).max()
+            contact_vt_hessian = np.abs(vt_contact_hessian_values).max()
             contact_vt_residual = np.abs(vt_contact_forces.numpy()).max()
 
             with open(path_hessian, "a") as f:
@@ -3964,7 +4120,7 @@ class zcy_SolverNewton(SolverBase):
 
         if self.DeBUG['DeBUG'] & self.DeBUG['record_hessian']:
             path_hessian = f"running_log/run_{self.DeBUG['record_name']}_hessian_isbeing_log.txt"
-            spring_hessian = np.abs(spring_hessian_values.numpy()).max()
+            spring_hessian = np.abs(spring_hessian_values).max()
             spring_residual = np.abs(spring_forces.numpy()).max()
 
             with open(path_hessian, "a") as f:
@@ -4025,7 +4181,7 @@ class zcy_SolverNewton(SolverBase):
         #print(f"\nbending_hessian_values={bending_hessian_values}, bending_hessian_values.shape={bending_hessian_values.shape}")
         if self.DeBUG['DeBUG'] & self.DeBUG['record_hessian']:
             path_hessian = f"running_log/run_{self.DeBUG['record_name']}_hessian_isbeing_log.txt"
-            bending_hessian = np.abs(bending_hessian_values.numpy()).max()
+            bending_hessian = np.abs(bending_hessian_values).max()
             bending_residual = np.abs(bending_forces.numpy()).max()
 
             with open(path_hessian, "a") as f:
@@ -4147,33 +4303,80 @@ class zcy_SolverNewton(SolverBase):
                 grad_error_norm_of_energy_fd: norm of gradient error of finite difference and mysolver
                 hessian_error_norm_of_grad_fd: norm of hessian error of finite difference and mysolver
         '''
+        # preprocess
+        self.zcy_collision_detection_penetration_free(pos_warp)
+
         # 0. Switch
         self.DeBUG['Spring'] = Check_Switch['Elastic']
         self.DeBUG['Bending'] = Check_Switch['Bending']
         self.DeBUG['Contact'] = Check_Switch['Contact']
         self.DeBUG['Contact_EE'] = Check_Switch['Contact_EE']
         self.DeBUG['Contact_VT'] = Check_Switch['Contact_VT']
-        self.DeBUG['Inertia_Hessian'] = Check_Switch['Inertia_Hessian']
-        self.spring['Spring'] = Check_Switch['Spring_Elastic']
+        self.DeBUG['Inertia_Hessian'] = Check_Switch['Inertia']
+        self.DeBUG['Eigen'] = False
+        self.spring = 1 if Check_Switch['Spring_Elastic'] else 0
+        mass = self.mass
+
+        print('Finish preprocess, compute energy in progress...')
     
         # compute energy
         energy = self.zcy_compute_energy_for_fd_check(pos_warp, pos_prev_warp, vel_warp, dt, mass, Check_Switch)
+        print(f'Finish compute energy, energy={energy}')
 
         # compute grad
         grad = self.zcy_compute_grad_for_fd_check(pos_warp, pos_prev_warp, vel_warp, dt, mass, Check_Switch)
+        print(f'Finish compute grad, grad={grad.shape}')
 
         # compute hessian
-        hessian = self.zcy_compute_hessian_for_fd_check(pos_warp, pos_prev_warp, vel_warp, dt, mass, Check_Switch)
+        self.zcy_compute_static_matrix(dt, mass)
+        hessian = self.zcy_compute_hessian_for_fd_check(pos_warp, pos_prev_warp, dt, Check_Switch)
+        print(f'Finish compute hessian, hessian={hessian.shape}')
         
         # compute grad_fd_by_fd_enegy
-        #grad_fd_by_fd_energy = self.zcy_compute_grad_fd_by_fd_energy(pos_warp, pos_prev_warp, vel_warp, dt, mass, Check_Switch)
+        grad_fd_by_fd_energy = self.zcy_compute_grad_fd_by_fd_energy(pos_warp, pos_prev_warp, vel_warp, dt, mass, Check_Switch)
+        print(f'Finish compute grad_fd_by_fd_energy, grad_fd_by_fd_energy={grad_fd_by_fd_energy.shape}')
 
         # compute hessian_fd_by_fd_grad
-        #hessian_fd_by_fd_grad = self.zcy_compute_hessian_fd_by_fd_grad(pos_warp, pos_prev_warp, vel_warp, dt, mass, Check_Switch)
+        hessian_fd_by_fd_grad = self.zcy_compute_hessian_fd_by_fd_grad(pos_warp, pos_prev_warp, vel_warp, dt, mass, Check_Switch)
+        
+        print(f'Finish compute hessian_fd_by_fd_grad, hessian_fd_by_fd_grad={hessian_fd_by_fd_grad.shape}')
 
         # compute error norm of grad
+        grad_np = grad.numpy() if hasattr(grad, "numpy") else np.asarray(grad)
+        grad_fd_np = grad_fd_by_fd_energy.numpy() if hasattr(grad_fd_by_fd_energy, "numpy") else np.asarray(grad_fd_by_fd_energy)
+        _rel_norm = float(np.max(np.abs(grad_np))) if float(np.max(np.abs(grad_np))) > 1.0 else 1.0
+        grad_error_norm_of_energy_fd = float(np.max(np.abs(grad_np - grad_fd_np))) / _rel_norm
 
         # compute error norm of hessian
+        if hasattr(hessian, "toarray"):
+            h_dense = hessian.toarray()
+        else:
+            h_dense = np.asarray(hessian)
+
+        n = self.free_particle_num
+        hessian_np = h_dense.reshape(n, 3, n, 3).transpose(0, 2, 1, 3)
+        hessian_fd_np = (
+            hessian_fd_by_fd_grad.numpy()
+            if hasattr(hessian_fd_by_fd_grad, "numpy")
+            else np.asarray(hessian_fd_by_fd_grad)
+        )
+        _rel_norm = float(np.max(np.abs(hessian_np))) if float(np.max(np.abs(hessian_np))) > 1.0 else 1.0
+        hessian_error_norm_of_grad_fd = float(np.max(np.abs(hessian_np - hessian_fd_np))) / _rel_norm
+
+        return (
+            energy.numpy()[0],
+            grad.numpy(),
+            hessian,
+            grad_fd_by_fd_energy,
+            hessian_fd_by_fd_grad,
+            grad_error_norm_of_energy_fd,
+            hessian_error_norm_of_grad_fd,
+        )
+
+    def zcy_collision_detection_for_check(self, pos_warp):
+        self.trimesh_collision_detector.refit(pos_warp)
+        self.trimesh_collision_detector.vertex_triangle_collision_detection(self.self_contact_margin)
+        self.trimesh_collision_detector.edge_edge_collision_detection(self.self_contact_margin)
 
 
     def zcy_compute_energy_for_fd_check(self, pos_warp, pos_prev_warp, vel_warp, dt, mass, Check_Switch):
@@ -4202,6 +4405,9 @@ class zcy_SolverNewton(SolverBase):
 
         # contact energy
         if Check_Switch['Contact']:
+            # collision detection
+            self.zcy_collision_detection_for_check(pos_warp)
+
             wp.launch(
                 kernel=zcy_accumulate_contact_energy,
                 inputs=[
@@ -4278,54 +4484,28 @@ class zcy_SolverNewton(SolverBase):
 
         return energy
 
-    def zcy_compute_grad_for_fd_check(self, pos_warp, pos_prev_warp, dt, Check_Switch):
-        grad = wp.zeros(shape=(self.model.particle_count, 3), dtype=float)
-
-        # region: 0.inertia and gravity
-        inertia_grad = wp.zeros(shape=(self.free_particle_num,), dtype=wp.vec3)
-
-        if Check_Switch['Inertia']:
-            wp.launch(
-                kernel=zcy_inertia_and_gravity_grad_computation,
-                inputs=[
-                    pos_warp,
-                    pos_prev_warp,
-                    vel_warp,
-                    dt,
-                    mass,
-                    self.model.gravity,
-                    # fixed particle
-                    self.free_particle_offset,
-                    # outputs: 
-                    inertia_grad
-                ],
-                dim=self.free_particle_num,
-                device=self.device,
-            )
-    # endregion
- 
-        # region: 1.contact force
-        # edge_contact
+    def zcy_compute_grad_for_fd_check(self, pos_warp, pos_prev_warp, vel_warp, dt, mass, Check_Switch):
+        self.spring_forces.zero_()
         self.edge_contact_forces.zero_()
-        # vertex-triangle_contact
         self.vt_contact_forces.zero_()
-        # DeBUG_array
-        if Check_Switch['Contact']:
-            # dim
+        self.bending_forces.zero_()
+
+        if Check_Switch["Contact"]:
+            # collision detection
+            self.zcy_collision_detection_for_check(pos_warp)
+            
             wp.launch(
                 kernel=zcy_accumulate_contact_force,
                 dim=self.num_contact,
                 inputs=[
                     pos_warp,
-                    # DeBUG
-                    Check_Switch['Contact_EE'],
-                    Check_Switch['Contact_VT'],
-                    self.DeBUG['barrier_threshold'],
+                    Check_Switch["Contact_EE"],
+                    Check_Switch["Contact_VT"],
+                    self.DeBUG["barrier_threshold"],
                     pos_prev_warp,
                     dt,
                     self.model.tri_indices,
                     self.model.edge_indices,
-                    # self-contact
                     self.trimesh_collision_info,
                     self.self_contact_radius,
                     self.model.soft_contact_ke,
@@ -4335,89 +4515,157 @@ class zcy_SolverNewton(SolverBase):
                     self.trimesh_collision_detector.edge_edge_parallel_epsilon,
                 ],
                 outputs=[
-                    # edge_contact
                     self.edge_contact_forces,
-                    # vertex-triangle_contact
                     self.vt_contact_forces,
                 ],
                 device=self.device,
             )
-    # endregion
 
-        # region: 2.elastic force
-        self.spring_forces.zero_()
-
-        if Check_Switch['Spring']:
-            if Check_Switch['Spring_Elastic']:
+        if Check_Switch["Elastic"]:
+            if Check_Switch["Spring_Elastic"]:
                 wp.launch(
                     kernel=zcy_accumulate_spring_force,
                     inputs=[
                         pos_warp,
                         pos_prev_warp,
                         dt,
-                        # spring constraints
                         self.spring_indices,
                         self.spring_rest_length,
                         self.spring_stiffness,
                         self.model.spring_damping,
-                        # outputs: particle force and hessian
                         self.spring_forces,
                     ],
                     dim=self.num_spring,
                     device=self.device,
                 )
-            elif Check_Switch['Stvk_Elastic']:
+            elif Check_Switch["Stvk_Elastic"]:
                 wp.launch(
                     kernel=zcy_accumulate_stvk_force,
                     inputs=[
                         pos_warp,
                         pos_prev_warp,
                         dt,
-                        # stvk force and hessian
                         self.model.tri_indices,
                         self.model.tri_poses,
                         self.model.tri_materials,
                         self.model.tri_areas,
-                        # outputs: particle force and hessian
                         self.spring_forces,
                     ],
                     dim=self.num_triangles,
                     device=self.device,
                 )
-    # endregion
 
-        # region: 3.bending force
-        self.bending_forces.zero_()
-        if Check_Switch['Bending']:     
+        if Check_Switch["Bending"]:
             wp.launch(
                 kernel=zcy_accumulate_bending_force,
                 inputs=[
                     pos_warp,
                     pos_prev_warp,
                     dt,
-                    # bending force and hessian
                     self.model.edge_indices,
                     self.model.edge_rest_angle,
                     self.model.edge_rest_length,
                     self.model.edge_bending_properties,
-                    # outputs: particle force and hessian
                     self.bending_forces,
                 ],
                 dim=self.num_spring,
                 device=self.device,
             )
-    # endregion
 
-        grad = inertia_grad - (self.spring_forces + self.edge_contact_forces + self.vt_contact_forces + self.bending_forces)
+        grad = wp.zeros(shape=(self.free_particle_num,), dtype=wp.vec3)
+        inertia_on = bool(Check_Switch.get("Inertia", True))
+        mass_eff = float(mass) if inertia_on else 0.0
+        gravity_eff = self.model.gravity if inertia_on else wp.vec3(0.0, 0.0, 0.0)
+
+        wp.launch(
+            kernel=zcy_residual_computation,
+            inputs=[
+                pos_warp,
+                pos_prev_warp,
+                vel_warp,
+                dt,
+                mass_eff,
+                gravity_eff,
+                self.spring_forces,
+                self.edge_contact_forces,
+                self.vt_contact_forces,
+                self.bending_forces,
+                self.free_particle_offset,
+                grad,
+            ],
+            dim=self.free_particle_num,
+            device=self.device,
+        )
 
         return grad
 
     def zcy_compute_hessian_for_fd_check(self, pos_warp, pos_prev_warp, dt, Check_Switch):
+        # collision detection
+        self.zcy_collision_detection_for_check(pos_warp)
 
         Hessian =   self.zcy_assemble_matrix(pos_warp, pos_prev_warp, dt)
 
         return Hessian
 
+    def zcy_compute_grad_fd_by_fd_energy(self, pos_warp, pos_prev_warp, vel_warp, dt, mass, Check_Switch):
+        h = 1e-3
+        pos0 = pos_warp.numpy() if hasattr(pos_warp, "numpy") else np.asarray(pos_warp)
+        offsets = self.free_particle_offset.numpy() if hasattr(self.free_particle_offset, "numpy") else np.asarray(self.free_particle_offset)
+
+        grad = np.zeros((self.free_particle_num, 3), dtype=pos0.dtype)
+        for tid in range(self.free_particle_num):
+            p_idx = tid + int(offsets[tid])
+            for axis in range(3):
+                pos_plus = pos0.copy()
+                pos_minus = pos0.copy()
+                pos_plus[p_idx, axis] += h
+                pos_minus[p_idx, axis] -= h
+
+                pos_plus_warp = wp.array(pos_plus, dtype=wp.vec3, device=self.device)
+                pos_minus_warp = wp.array(pos_minus, dtype=wp.vec3, device=self.device)
+
+                e_plus = self.zcy_compute_energy_for_fd_check(
+                    pos_plus_warp, pos_prev_warp, vel_warp, dt, mass, Check_Switch
+                )
+                e_minus = self.zcy_compute_energy_for_fd_check(
+                    pos_minus_warp, pos_prev_warp, vel_warp, dt, mass, Check_Switch
+                )
+
+                e_plus_s = float(e_plus.numpy()[0]) if hasattr(e_plus, "numpy") else float(np.asarray(e_plus)[0])
+                e_minus_s = float(e_minus.numpy()[0]) if hasattr(e_minus, "numpy") else float(np.asarray(e_minus)[0])
+                grad[tid, axis] = (e_plus_s - e_minus_s) / (2.0 * h)
+
+        return grad
+
+    def zcy_compute_hessian_fd_by_fd_grad(self, pos_warp, pos_prev_warp, vel_warp, dt, mass, Check_Switch):
+        h = 1e-3
+        pos0 = pos_warp.numpy() if hasattr(pos_warp, "numpy") else np.asarray(pos_warp)
+        offsets = self.free_particle_offset.numpy() if hasattr(self.free_particle_offset, "numpy") else np.asarray(self.free_particle_offset)
+
+        hessian = np.zeros((self.free_particle_num, self.free_particle_num, 3, 3), dtype=pos0.dtype)
+        for jdx in range(self.free_particle_num):
+            p_j = jdx + int(offsets[jdx])
+            for axis_j in range(3):
+                pos_plus = pos0.copy()
+                pos_minus = pos0.copy()
+                pos_plus[p_j, axis_j] += h
+                pos_minus[p_j, axis_j] -= h
+
+                pos_plus_warp = wp.array(pos_plus, dtype=wp.vec3, device=self.device)
+                pos_minus_warp = wp.array(pos_minus, dtype=wp.vec3, device=self.device)
+
+                g_plus = self.zcy_compute_grad_for_fd_check(
+                    pos_plus_warp, pos_prev_warp, vel_warp, dt, mass, Check_Switch
+                )
+                g_minus = self.zcy_compute_grad_for_fd_check(
+                    pos_minus_warp, pos_prev_warp, vel_warp, dt, mass, Check_Switch
+                )
+
+                g_plus_np = g_plus.numpy() if hasattr(g_plus, "numpy") else np.asarray(g_plus)
+                g_minus_np = g_minus.numpy() if hasattr(g_minus, "numpy") else np.asarray(g_minus)
+                hessian[:, jdx, :, axis_j] = (g_plus_np - g_minus_np) / (2.0 * h)
+
+        return hessian
       
 # zcy
 
