@@ -4283,6 +4283,7 @@ class zcy_SolverNewton(SolverBase):
         self.vt_contact_hessian_rows = wp.zeros(self.num_vt_contact*16, dtype=int, device=self.device)
         self.vt_contact_hessian_cols = wp.zeros(self.num_vt_contact*16, dtype=int, device=self.device)
 
+# zcy_check_grad_and_hessian_via_fd
     def zcy_check_grad_and_hessian_via_fd(self, pos_warp, pos_prev_warp, vel_warp, dt: float, Check_Switch:dict):
         '''
         input: 
@@ -4318,6 +4319,7 @@ class zcy_SolverNewton(SolverBase):
         self.DeBUG['Contact_VT'] = Check_Switch['Contact_VT']
         self.DeBUG['Inertia_Hessian'] = Check_Switch['Inertia']
         self.DeBUG['Eigen'] = False
+        self.perturbation_epsilon = Check_Switch['perturbation_epsilon']
         self.spring = 1 if Check_Switch['Spring_Elastic'] else 0
         mass = self.mass
 
@@ -4612,7 +4614,7 @@ class zcy_SolverNewton(SolverBase):
         return Hessian
 
     def zcy_compute_grad_fd_by_fd_energy(self, pos_warp, pos_prev_warp, vel_warp, dt, mass, Check_Switch):
-        h = 1e-3
+        h = self.perturbation_epsilon
         pos0 = pos_warp.numpy() if hasattr(pos_warp, "numpy") else np.asarray(pos_warp)
         offsets = self.free_particle_offset.numpy() if hasattr(self.free_particle_offset, "numpy") else np.asarray(self.free_particle_offset)
 
@@ -4642,7 +4644,7 @@ class zcy_SolverNewton(SolverBase):
         return grad
 
     def zcy_compute_hessian_fd_by_fd_grad(self, pos_warp, pos_prev_warp, vel_warp, dt, mass, Check_Switch):
-        h = 1e-3
+        h = self.perturbation_epsilon
         pos0 = pos_warp.numpy() if hasattr(pos_warp, "numpy") else np.asarray(pos_warp)
         offsets = self.free_particle_offset.numpy() if hasattr(self.free_particle_offset, "numpy") else np.asarray(self.free_particle_offset)
 
