@@ -3534,13 +3534,15 @@ class zcy_SolverNewton(SolverBase):
             
             if absolute_residual_condition or relative_residual_condition:
                 break
-            if numerical_precision_condition0 or numerical_precision_condition1:
-                with open(log_warning_path, "a", encoding="utf-8") as f:
-                    f.write(f'time_step: {time_step}; iter: {_iter}; line_search_times: {_line_search_times} \n')
-                    f.write(f'condition0:{numerical_precision_condition0}; condition1:{numerical_precision_condition1}\n')
-                    f.write(f'residual_norm0: {residual_norm0} |energy0: {energy0} |incremental_energy: {incremental_energy} |alpha: {alpha}\n')
-                    f.write(f'"Warning: Newton iteration stalled. Energy implies convergence but Residual is high."\n\n')
-                break
+
+            if self.DeBUG['DeBUG']:
+                if numerical_precision_condition0 or numerical_precision_condition1:
+                    with open(log_warning_path, "a", encoding="utf-8") as f:
+                        f.write(f'time_step: {time_step}; iter: {_iter}; line_search_times: {_line_search_times} \n')
+                        f.write(f'condition0:{numerical_precision_condition0}; condition1:{numerical_precision_condition1}\n')
+                        f.write(f'residual_norm0: {residual_norm0} |energy0: {energy0} |incremental_energy: {incremental_energy} |alpha: {alpha}\n')
+                        f.write(f'"Warning: Newton iteration stalled. Energy implies convergence but Residual is high."\n\n')
+                    break
 
             # region: iteration information 
             if self.DeBUG['DeBUG'] & self.DeBUG['max_information']:
@@ -4266,6 +4268,8 @@ class zcy_SolverNewton(SolverBase):
         # contact num
         self.num_ee_contact = int(self.trimesh_collision_detector.collision_info.edge_colliding_edges.shape[0]/2)
         self.num_vt_contact = int(self.trimesh_collision_detector.collision_info.vertex_colliding_triangles.shape[0]/2)
+        print(f"ee_max_num={self.trimesh_collision_detector.collision_info.edge_colliding_edges_buffer_sizes.numpy().max()}")
+        print(f"vt_max_num={self.trimesh_collision_detector.collision_info.vertex_colliding_triangles_buffer_sizes.numpy().max()}")
         print(f"num_ee_contact={self.num_ee_contact}, num_vt_contact={self.num_vt_contact}")
         self.num_contact = int(max(self.num_ee_contact, self.num_vt_contact))
         # edge_contact
